@@ -252,6 +252,8 @@ table.t tbody tr:hover td { background: var(--primaria-50); }
 .logincard p.s { text-align: center; color: var(--texto-suave); font-size: 12.5px; margin: 0 0 18px; }
 .logincard label { display: block; font-size: 12.5px; font-weight: 600; margin-bottom: 14px; }
 .logincard input { width: 100%; margin-top: 5px; padding: 11px 14px; border-radius: var(--raio-md); }
+.logincard select { width: 100%; margin-top: 5px; padding: 11px 14px; border-radius: var(--raio-md); }
+.logincard p.sec { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--primaria-700); margin: 16px 0 10px; padding-bottom: 5px; border-bottom: 1px solid var(--borda); }
 .logincard .btn { width: 100%; justify-content: center; padding: 12px; }
 .logincard .err { color: var(--erro-tx); background: var(--erro-bg); border: 1px solid var(--erro-bd); border-radius: var(--raio-md); padding: 9px 12px; font-size: 12.5px; margin-bottom: 14px; }
 .usermenu { position: relative; }
@@ -1135,13 +1137,20 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       guardaSessao(j);
       try { return await rpc('entrar'); } catch (x) { try { await http('/auth/v1/logout', { token: sess && sess.access_token }); } catch (_) { /* */ } gravaSess(null); throw x; }
     },
-    /** Primeiro acesso: reconhece o pré-cadastro (e libera) ou deixa pendente de aprovação de um gestor. */
+    /** Cargos para a tela de criar acesso (antes do login). Se o banco ainda não tiver a função, vale a lista padrão. */
+    async cargos() { try { const r = await rpc('lista_cargos', {}, true); if (Array.isArray(r) && r.length) return r; } catch (_) { /* usa a lista padrão */ } return C.CARGOS_PADRAO.map((c) => c.nome); },
+    /** Primeiro acesso: exige identificação, cargo e contato; reconhece o pré-cadastro (e libera) ou deixa pendente de aprovação de um gestor. */
     async acesso(b) {
       const nome = String(b.nome || '').replace(/\s+/g, ' ').trim().slice(0, 80); const email = C.normEmail(b.email); const matricula = String(b.matricula || '').trim().slice(0, 20); const cpf = C.digitos(b.cpf);
-      const e = (nome.length < 3 ? 'Informe o nome completo.' : null) || (C.emailValido(email) ? null : 'Informe um e-mail válido: é por ele que o acesso é vinculado ao cadastro.') || (matricula ? null : 'Informe a matrícula.') || (C.cpfValido(cpf) ? null : 'CPF inválido.') || validaSenha(b.senha, email.split('@')[0]);
+      const cargo = String(b.cargo || '').trim(); const telefone = C.digitos(b.telefone); const admissao = String(b.admissao || '').trim(); const aniversario = String(b.aniversario || '').trim();
+      const hoje = (E.U && E.U.todayIso && E.U.todayIso()) || new Date().toISOString().slice(0, 10); const limAdm = new Date(Date.parse(hoje + 'T00:00:00Z') + 90 * 86400000).toISOString().slice(0, 10);
+      const dataOk = (d, max) => /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(Date.parse(d + 'T00:00:00Z')) && new Date(d + 'T00:00:00Z').toISOString().slice(0, 10) === d && d >= '1900-01-01' && d <= max;
+      const e = (nome.length < 3 ? 'Informe o nome completo.' : null) || (C.emailValido(email) ? null : 'Informe um e-mail válido: é por ele que o acesso é vinculado ao cadastro.') || (cargo ? null : 'Selecione o seu cargo.')
+        || (matricula ? null : 'Informe a matrícula.') || (C.cpfValido(cpf) ? null : 'CPF inválido.') || (dataOk(admissao, limAdm) ? null : 'Informe a data de admissão.') || (dataOk(aniversario, hoje) ? null : 'Informe a data de aniversário.')
+        || (C.telValido(telefone) ? null : 'Informe o telefone ou celular, com DDD.') || validaSenha(b.senha, email.split('@')[0]);
       if (e) throw erro(400, e);
       await criaConta(email, b.senha);
-      let r; try { r = await rpc('primeiro_acesso', { nome, matricula, cpf }); } catch (x) { await abandona(); throw x; }
+      let r; try { r = await rpc('primeiro_acesso', { nome, matricula, cpf, cargo, admissao, aniversario, telefone }); } catch (x) { await abandona(); throw x; }
       if (r.pendente) { try { await http('/auth/v1/logout', { token: sess && sess.access_token }); } catch (_) { /* */ } gravaSess(null); return { pendente: true }; }
       return r;
     },
@@ -1234,11 +1243,27 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   /** Verifica o perfil do usuário logado: A.can('edicao'), A.can('admin'). */
   A.can = (perfil) => !!A.user && RANK[A.user.perfil] >= RANK[perfil];
 
+  /** Alcance do usuário (vem do banco): 'tudo' (edição/administrador), 'setor' (Analista III com setor: o próprio setor) ou 'proprio' (só o próprio cadastro). Servidores antigos não mandam: valem como 'tudo'. */
+  A.escopo = { tipo: 'tudo' };
+  A.limitado = () => !!A.user && A.escopo.tipo !== 'tudo';
+  A.meuColab = () => (A.user && A.user.colabId) || '';
+  /** Pode lançar escala para este colaborador? Edição/administrador: qualquer um. Consulta: ele mesmo; Analista III: também o próprio setor (o banco confere de novo). */
+  A.podeEscala = (id) => {
+    if (!A.user || !id) return false; if (A.can('edicao')) return true;
+    const e = A.escopo; if (!e.colabId) return false; if (id === e.colabId) return true;
+    if (e.tipo !== 'setor') return false; const c = A.colab(id); return !!c && U.normName(c.setor || '') === U.normName(e.setor || '');
+  };
+  A.podeEscalaAlgo = () => !!A.user && (A.can('edicao') || !!A.escopo.colabId);
+  /** Colaboradores que a pessoa pode escolher em formulários de evento e MOP: todos (edição/administrador) ou só o próprio cadastro (consulta). */
+  A.colabsDoForm = () => (A.can('edicao') ? A.data.colaboradores : A.data.colaboradores.filter((c) => c.id === A.meuColab()));
+
   A.init = async () => { await A.load(); A.escolheDataInicial(); A.startPolling(); };
   A.load = async () => {
     const r = await E.API.data();
-    A.rev = r.rev; A.user = r.usuario; A.pendAcessos = (r.pendencias && r.pendencias.acessos) || 0;
+    A.rev = r.rev; A.user = r.usuario; A.pendAcessos = (r.pendencias && r.pendencias.acessos) || 0; A.escopo = r.escopo || { tipo: 'tudo' };
     for (const n of NOMES) A.data[n] = r.stores[n] || [];
+    // cadastros de apoio (gestor direto do usuário, necessário para a MOP) ficam fora das listas
+    const todos = A.data.colaboradores; A.data.apoio = todos.filter((c) => c.apoio); A.data.colaboradores = todos.filter((c) => !c.apoio);
     A.rebuild();
   };
   A.rebuild = () => {
@@ -1247,7 +1272,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     d.cadeiras.sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
     d.colaboradores.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
     A.cargosLista = C.normalizaCargos(A.cfg('cargos', null));
-    d.gestores = C.gestoresDe(d.colaboradores, A.cargosLista); A._porId = new Map(d.colaboradores.map((c) => [c.id, c])); // gestor = cadastro com cargo de gestão
+    const comApoio = d.colaboradores.concat(d.apoio || []);
+    d.gestores = C.gestoresDe(comApoio, A.cargosLista); A._porId = new Map(comApoio.map((c) => [c.id, c])); // gestor = cadastro com cargo de gestão
     A.siglas = A.cfg('siglas', E.SIGLAS_PADRAO);
     A.siglasMap = D.siglasMap(A.siglas);
     A.escalaIdx = D.indexEscala(d.escala);
@@ -1390,7 +1416,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     const titulos = { geral: 'Visão geral', escala: 'Escala de trabalho', planta: 'Planta do escritório', colabs: 'Colaboradores', ferias: 'Férias e MOP', eventos: 'Eventos e compromissos', relatorios: 'Indicadores e relatórios', config: 'Configurações' };
     A.$('#pageTitle').firstChild.textContent = titulos[A.view] || '';
     A.tip(null);
-    const fb = A.$('#filtros'); if (fb) fb.style.display = A.view === 'config' ? 'none' : '';
+    const fb = A.$('#filtros'); if (fb) fb.style.display = A.view === 'config' || A.limitado() ? 'none' : '';
     try { v.render(c); } catch (e) { console.error(e); c.innerHTML = `<div class="alert err">${A.icon('warn')}<div>Não foi possível exibir esta tela. ${esc(e.message)}</div></div>`; }
   };
   root.addEventListener('error', (e) => { try { A.toast('Ocorreu um erro inesperado. Seus dados salvos não foram afetados.', 'err'); } catch (_) { /* */ } console.error(e.error || e.message); });
@@ -1538,8 +1564,39 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   };
   A.alertasHtml = (lista, max) => lista.slice(0, max || 99).map((a) => `<div class="alert ${a.t}">${A.icon(a.t === 'info' ? 'info' : 'warn')}<div>${esc(a.msg)}${a.origem ? ' <span class="muted small">(última importação)</span>' : ''}</div></div>`).join('');
 
+  /** Visão geral de quem só enxerga os próprios dados (consulta / Analista III): o dia, os próximos dias, férias e eventos dessa pessoa. */
+  function renderPessoal(c) {
+    const me = A.colab(A.meuColab()); const C = E.Cad; const hoje = A.date;
+    const cadastro = (A.meuColab() && me) ? '' : `<div class="alert warn">${A.icon('warn')}<div>Seu acesso ainda não está ligado a um cadastro de colaborador. Peça a um gestor para completar o seu cadastro.</div></div>`;
+    const sig = (id, d) => { const r = (A.escalaIdx.get(d) || new Map()).get(id); return r ? r.sigla : null; };
+    const pill = (id, d) => { const g = sig(id, d); return g == null ? '<span class="muted small">sem escala</span>' : A.pillSigla(g, D.classeDe(g, A.siglasMap)); };
+    const kp = (v, l, sub, k) => `<div class="kpi" style="--k:${k || 'var(--primaria-500)'}"><div class="v" style="font-size:22px">${v}</div><div class="l">${l}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div>`;
+    let pos = '—';
+    if (me) { try { const ind = D.indicadoresDia(A.date, A.S(true)); const inv = new Map(); for (const [cad, col] of ind.eff) inv.set(col, cad); const cd = A.cadeira(inv.get(me.id)); if (cd) pos = `<b>${esc(cd.rotulo)}</b>`; } catch (_) { /* sem planta */ } }
+    const fer = A.data.ferias.filter((f) => f.status !== 'cancelada' && f.fim >= hoje).sort((a, b) => a.inicio.localeCompare(b.inicio))[0];
+    const ev = A.data.eventos.filter((e) => e.situacao !== 'cancelado' && e.data >= hoje).sort((a, b) => (a.data + (a.inicio || '')).localeCompare(b.data + (b.inicio || '')))[0];
+    const falta = me ? C.faltando(me, A.cargos()) : [];
+    const dias = U.range(hoje, U.addDays(hoje, 13)).filter((d) => U.weekday(d) % 6 !== 0);
+    const setor = A.escopo.tipo === 'setor' ? A.data.colaboradores.filter((x) => x.situacao !== 'inativo' && !A.foraEscala(x)) : [];
+    c.innerHTML = `${cadastro}${falta.length ? `<div class="alert warn">${A.icon('warn')}<div><b>Seu cadastro está incompleto</b> (falta: ${esc(falta.map((k) => C.ROTULOS[k]).join(', '))}). Um gestor completa esses dados; depois disso você passa a receber avisos e a entrar em MOP.</div></div>` : ''}
+      <div class="ro-note">${A.escopo.tipo === 'setor' ? `Você é <b>Analista III</b>: enxerga a escala do seu setor (<b>${esc(A.escopo.setor)}</b>). Os demais dados das pessoas ficam privados.` : 'Você enxerga apenas os <b>seus próprios dados</b>; o restante fica privado.'}</div>
+      <div class="grid kpis" style="margin-bottom:14px">
+        ${kp(pill(me && me.id, hoje), 'Minha escala em ' + U.fmtBRshort(hoje), U.WEEKDAY_LONG[U.weekday(hoje)])}
+        ${kp(pos, 'Minha posição (cadeira)', 'só em dia presencial', 'var(--c-presencial)')}
+        ${kp(fer ? `${U.fmtBRshort(fer.inicio)} a ${U.fmtBRshort(fer.fim)}` : '—', 'Minhas próximas férias', fer ? esc(fer.status === 'programada' ? 'Programada' : fer.status === 'cancelada' ? 'Cancelada' : 'MOP gerada') : 'Nenhuma programada', 'var(--secundaria-500)')}
+        ${kp(ev ? `${U.fmtBRshort(ev.data)}` : '—', 'Meu próximo evento', ev ? esc(ev.tipo) : 'Nenhum evento', 'var(--neutra-400)')}
+      </div>
+      <div class="toolbar no-print"><button class="btn pri" id="gEsc">${A.icon('cal')} ${A.escopo.tipo === 'setor' ? 'Montar a escala' : 'Montar minha escala'}</button><button class="btn" id="gFer">${A.icon('sun')} Programar férias / gerar MOP</button><button class="btn" id="gEv">${A.icon('event')} Registrar evento</button></div>
+      <div class="grid two">
+        <div class="card"><h2>Minha escala nos próximos dias</h2><div class="tablewrap"><table class="t"><thead><tr><th>Dia</th><th>Situação</th></tr></thead><tbody>${dias.map((d) => `<tr><td>${U.WEEKDAY_LABEL[U.weekday(d)]} ${U.fmtBR(d)}</td><td>${pill(me && me.id, d)}</td></tr>`).join('')}</tbody></table></div></div>
+        ${setor.length ? `<div class="card"><h2>Escala do setor em ${U.fmtBRshort(hoje)}</h2><div class="tablewrap"><table class="t"><thead><tr><th>Colaborador</th><th>Situação</th></tr></thead><tbody>${setor.map((x) => `<tr><td>${esc(x.nome)}</td><td>${pill(x.id, hoje)}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
+      </div>`;
+    A.$('#gEsc', c).onclick = () => A.go('escala'); A.$('#gFer', c).onclick = () => A.go('ferias'); A.$('#gEv', c).onclick = () => A.go('eventos');
+  }
+
   A.views.geral = {
     render(c) {
+      if (A.limitado()) return renderPessoal(c);
       const draw = () => {
         const ds = A.datasComEscala();
         if (!A.data.colaboradores.length) {
@@ -1654,7 +1711,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       const itens = [];
       for (let w = 1; w <= n; w++) for (let k = 0; k < 7; k++) {
         const src = U.addDays(ori, k), dst = U.addDays(ori, 7 * w + k);
-        for (const [id, r] of (A.escalaIdx.get(src) || new Map())) { const col = A.colab(id); if (col && col.situacao !== 'inativo') itens.push({ date: dst, colabId: id, sigla: r.sigla }); }
+        for (const [id, r] of (A.escalaIdx.get(src) || new Map())) { const col = A.colab(id); if (col && col.situacao !== 'inativo' && A.podeEscala(id)) itens.push({ date: dst, colabId: id, sigla: r.sigla }); }
       }
       if (!itens.length) { A.toast('A semana de origem não tem escala para copiar.', 'warn'); return false; }
       if (!(await A.confirm({ titulo: 'Repetir semana', msg: `Copiar ${itens.length} registro(s) para ${n} semana(s)? Dias de destino já preenchidos serão substituídos.`, ok: 'Copiar' }))) return false;
@@ -1665,7 +1722,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
   A.views.escala = {
     render(c) {
-      const f = A.ui.escala; const pode = A.can('edicao'); if (!pode) f.edit = false;
+      const f = A.ui.escala; const pode = A.podeEscalaAlgo(); const completo = A.can('edicao'); if (!pode) f.edit = false;
       const draw = () => {
         const y = Number(A.date.slice(0, 4)), m = Number(A.date.slice(5, 7));
         const anos = [...new Set([...A.datasComEscala().map((k) => Number(k.slice(0, 4))), y - 1, y, y + 1])].sort();
@@ -1676,7 +1733,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         const sit = (id, d) => { const r = (A.escalaIdx.get(d) || new Map()).get(id); return r ? D.classeDe(r.sigla, A.siglasMap) : null; };
         const linhas = colabsF.filter((x) => !f.situacao || f.situacao === 'inativos' || dias.some((d) => (f.situacao === 'sem' ? !sit(x.id, d) && U.weekday(d) % 6 !== 0 : sit(x.id, d) === f.situacao)));
         const temAlgo = dias.some((d) => A.escalaIdx.has(d));
-        const al = A.alertas(A.date);
+        const al = A.limitado() ? [] : A.alertas(A.date);
         const semColabs = !A.data.colaboradores.some((c) => !A.foraEscala(c));
         const opcoesSigla = `<option value="">(sem escala)</option>${A.siglas.map((s) => `<option value="${esc(s.sigla)}">${esc(s.sigla)} — ${esc(s.descricao)}</option>`).join('')}`;
         let corpo;
@@ -1687,7 +1744,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
             const r = (A.escalaIdx.get(A.date) || new Map()).get(x.id); const cl = r ? D.classeDe(r.sigla, A.siglasMap) : null;
             const cad = invEff.get(x.id); const cd = cad && A.cadeira(cad);
             const pos = cl === 'presencial' ? (cd ? `<b>${esc(cd.rotulo)}</b> <span class="muted small">${esc(cd.zona)}</span>` : '<span class="pill warn">sem cadeira</span>') : (cd ? `<span class="muted small">titular de ${esc(cd.rotulo)}</span>` : '<span class="muted">—</span>');
-            const cel = pode ? `<select data-sel="${x.id}" aria-label="Sigla de ${esc(x.nome)}">${opcoesSigla.replace(`value="${esc(r ? r.sigla : '§')}"`, `value="${esc(r ? r.sigla : '§')}" selected`)}</select>` : A.pillSigla(r && r.sigla, cl);
+            const cel = A.podeEscala(x.id) ? `<select data-sel="${x.id}" aria-label="Sigla de ${esc(x.nome)}">${opcoesSigla.replace(`value="${esc(r ? r.sigla : '§')}"`, `value="${esc(r ? r.sigla : '§')}" selected`)}</select>` : A.pillSigla(r && r.sigla, cl);
             return `<tr><td><b>${esc(x.nome)}</b>${x.situacao === 'inativo' ? ' <span class="pill ausente">inativo</span>' : ''}</td><td>${cel}</td><td>${r ? esc(cl === 'ausente' && A.siglasMap[r.sigla] && A.siglasMap[r.sigla].sensivel && A.privado ? 'Ausente' : (A.siglasMap[r.sigla] ? A.siglasMap[r.sigla].descricao : 'Sigla não reconhecida')) : '<span class="muted">sem escala</span>'}</td><td>${pos}</td><td class="small muted">${r && r.por ? `${esc(r.por)} · ${new Date(r.em).toLocaleString('pt-BR')}` : '—'}</td></tr>`;
           }).join('') || '<tr><td colspan="5" class="empty">Nenhum colaborador encontrado com estes filtros.</td></tr>'}</tbody></table></div>`;
         } else {
@@ -1698,10 +1755,11 @@ https://github.com/nodeca/pako/blob/main/LICENSE
             return `<td class="c ${cl} ${d === A.date ? 'sel' : ''}" style="${rt.neutro ? '' : A.estiloSigla(r.sigla)}" data-d="${d}" data-c="${x.id}" title="${esc(x.nome)} · ${U.fmtBR(d)} · ${esc(rt.titulo)}${r.por ? ' · por ' + esc(r.por) : ''}">${esc(rt.texto)}</td>`;
           }).join('')}</tr>`).join('')}</tbody></table></div>`;
         }
-        const barra = pode ? `<div class="toolbar no-print"><button class="btn ${f.edit ? 'pri' : ''}" id="tEdit" ${f.modo === 'dia' ? 'disabled title="No modo Dia, escolha a sigla na própria linha"' : ''}>${A.icon('edit')} ${f.edit ? 'Edição ligada' : 'Editar escala'}</button>
-            <button class="btn" id="tRod">${A.icon('rotate')} Gerar por rodízio</button><button class="btn" id="tRep">${A.icon('copy')} Repetir semana</button><button class="btn" id="tUnd" ${A.data.historico.some((h) => h.reversivel && !h.desfeito) ? '' : 'disabled'}>${A.icon('undo')} Desfazer</button></div>
+        const aviso = A.limitado() ? `<div class="ro-note">${A.escopo.tipo === 'setor' ? `Você é <b>Analista III</b>: vê e altera a escala do seu setor (<b>${esc(A.escopo.setor)}</b>), e só dele.` : 'Você vê e monta apenas a <b>sua própria escala</b>; os dados das outras pessoas ficam privados.'}</div>` : '';
+        const barra = pode ? `${aviso}<div class="toolbar no-print"><button class="btn ${f.edit ? 'pri' : ''}" id="tEdit" ${f.modo === 'dia' ? 'disabled title="No modo Dia, escolha a sigla na própria linha"' : ''}>${A.icon('edit')} ${f.edit ? 'Edição ligada' : (A.escopo.tipo === 'proprio' && !completo ? 'Editar minha escala' : 'Editar escala')}</button>
+            ${completo ? `<button class="btn" id="tRod">${A.icon('rotate')} Gerar por rodízio</button>` : ''}<button class="btn" id="tRep">${A.icon('copy')} Repetir semana</button>${completo ? `<button class="btn" id="tUnd" ${A.data.historico.some((h) => h.reversivel && !h.desfeito) ? '' : 'disabled'}>${A.icon('undo')} Desfazer</button>` : ''}</div>
           ${f.edit && f.modo !== 'dia' ? `<div class="editbar"><b>Pincel:</b> ${A.siglas.map((s) => `<button class="tool ${f.ferramenta === s.sigla ? 'on' : ''}" data-tool="${esc(s.sigla)}" title="${esc(s.descricao)}"><i style="background:${s.cor || corClasse(s.classe)}"></i>${esc(s.sigla)}</button>`).join('')}<button class="tool ${f.ferramenta === '' ? 'on' : ''}" data-tool="" title="Apagar a sigla da célula">Apagar</button>
-            <span class="muted small">Escolha um pincel e clique ou arraste sobre as células. Clique no número do dia para aplicar a todos os colaboradores listados.</span></div>` : ''}` : `<div class="ro-note">Seu perfil é de <b>consulta</b>: você pode ver a escala, mas não alterá-la.</div>`;
+            <span class="muted small">Escolha um pincel e clique ou arraste sobre as células. Clique no número do dia para aplicar a todos os colaboradores listados.</span></div>` : ''}` : `<div class="ro-note">Seu perfil é de <b>consulta</b>: você pode ver a escala, mas não alterá-la.${A.limitado() ? ' Seu acesso ainda não está ligado a um cadastro de colaborador; peça a um gestor para completar.' : ''}</div>`;
         c.innerHTML = `
           <div class="toolbar no-print">
             <div class="seg" id="modo">${[['dia', 'Dia'], ['semana', 'Semana'], ['mes', 'Mês']].map(([k, l]) => `<button data-m="${k}" class="${f.modo === k ? 'on' : ''}">${l}</button>`).join('')}</div>
@@ -1729,8 +1787,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         if (A.$('#navP', c)) { A.$('#navP', c).onclick = () => step(-1); A.$('#navN', c).onclick = () => step(1); }
         if (pode) {
           A.$('#tEdit', c).onclick = () => { f.edit = !f.edit; if (f.edit && f.ferramenta == null) f.ferramenta = (A.siglas.find((s) => s.classe === 'presencial') || A.siglas[0] || {}).sigla; draw(); };
-          A.$('#tRod', c).onclick = abrirRodizio; A.$('#tRep', c).onclick = abrirRepetir;
-          A.$('#tUnd', c).onclick = async () => { try { const h = await A.undo(); if (h) { A.toast('Alteração desfeita: ' + h.resumo); A.render(); } else A.toast('Nada para desfazer.'); } catch (e) { A.toast(e.message, 'err'); } };
+          if (completo) A.$('#tRod', c).onclick = abrirRodizio; A.$('#tRep', c).onclick = abrirRepetir;
+          if (completo) A.$('#tUnd', c).onclick = async () => { try { const h = await A.undo(); if (h) { A.toast('Alteração desfeita: ' + h.resumo); A.render(); } else A.toast('Nada para desfazer.'); } catch (e) { A.toast(e.message, 'err'); } };
           A.$$('[data-sel]', c).forEach((s) => s.onchange = async () => { try { await A.salvarEscala([{ date: A.date, colabId: s.dataset.sel, sigla: s.value || null }], `${(A.colab(s.dataset.sel) || {}).nome}: ${s.value || 'sem escala'} em ${U.fmtBRshort(A.date)}`); A.render(); } catch (_) { A.render(); } });
           A.$$('[data-tool]', c).forEach((b) => b.onclick = () => { f.ferramenta = b.dataset.tool; A.$$('[data-tool]', c).forEach((x) => x.classList.toggle('on', x === b)); });
         }
@@ -1738,7 +1796,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         if (mx && f.edit) {
           let arrasto = null; const mudas = new Map();
           const pinta = (td) => {
-            const k = chave(td.dataset.d, td.dataset.c); if (mudas.has(k) || f.ferramenta == null) return;
+            const k = chave(td.dataset.d, td.dataset.c); if (mudas.has(k) || f.ferramenta == null || !A.podeEscala(td.dataset.c)) return;
             mudas.set(k, { date: td.dataset.d, colabId: td.dataset.c, sigla: f.ferramenta || null });
             td.style.outline = '2px solid var(--secundaria-500)'; td.textContent = f.ferramenta || '';
           };
@@ -1753,7 +1811,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
           if (A._pu) document.removeEventListener('pointerup', A._pu); A._pu = fim; document.addEventListener('pointerup', fim);
           A.$$('th[data-hd]', c).forEach((th) => th.onclick = async () => {
             if (f.ferramenta == null) { A.toast('Escolha um pincel primeiro.', 'warn'); return; }
-            const d = th.dataset.hd; const itens = linhas.filter((x) => x.situacao !== 'inativo').map((x) => ({ date: d, colabId: x.id, sigla: f.ferramenta || null }));
+            const d = th.dataset.hd; const itens = linhas.filter((x) => x.situacao !== 'inativo' && A.podeEscala(x.id)).map((x) => ({ date: d, colabId: x.id, sigla: f.ferramenta || null }));
             if (!itens.length) return;
             if (!(await A.confirm({ titulo: 'Aplicar a todos', msg: `${f.ferramenta ? 'Marcar <b>' + esc(f.ferramenta) + '</b>' : 'Limpar a escala'} em ${U.fmtBR(d)} para ${itens.length} colaborador(es) listado(s)?`, ok: 'Aplicar' }))) return;
             try { await A.salvarEscala(itens, `${f.ferramenta || 'Limpar'} em ${U.fmtBRshort(d)} para ${itens.length} colaborador(es)`); } catch (_) { /* */ }
@@ -2546,22 +2604,24 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   /* =============== tela =============== */
   A.views.colabs = {
     render(c) {
-      const f = A.ui.colabs; const ed = A.can('edicao');
-      const lista = A.visiveis().filter((x) => (f.sit === 'todos' || (f.sit === 'inativo' ? x.situacao === 'inativo' : x.situacao !== 'inativo')) && (!f.cad || C.faltando(x, A.cargos()).length) && (!f.tipo || C.tipoCadastro(x, A.cargos()) === f.tipo) && (!f.busca || U.normName([x.nome, x.matricula, x.email, x.setor, A.gestorNome(x.gestorId)].join(' ')).includes(U.normName(f.busca)) || (C.digitos(f.busca) && C.digitos(x.cpf).includes(C.digitos(f.busca)))));
-      const incompl = A.visiveis().filter((x) => x.situacao !== 'inativo' && C.faltando(x, A.cargos()).length).length;
+      const f = A.ui.colabs; const ed = A.can('edicao'); const lim = A.limitado();
+      /* quem vê só parte do cadastro não vê dados dos colegas: a pendência só vale para o próprio cadastro */
+      const falt = (x) => (!lim || x.id === A.meuColab() ? C.faltando(x, A.cargos()) : []);
+      const lista = A.visiveis().filter((x) => (f.sit === 'todos' || (f.sit === 'inativo' ? x.situacao === 'inativo' : x.situacao !== 'inativo')) && (!f.cad || falt(x).length) && (!f.tipo || C.tipoCadastro(x, A.cargos()) === f.tipo) && (!f.busca || U.normName([x.nome, x.matricula, x.email, x.setor, A.gestorNome(x.gestorId)].join(' ')).includes(U.normName(f.busca)) || (C.digitos(f.busca) && C.digitos(x.cpf).includes(C.digitos(f.busca)))));
+      const incompl = A.visiveis().filter((x) => x.situacao !== 'inativo' && falt(x).length).length;
       c.innerHTML = `<div class="toolbar"><input type="search" id="q" placeholder="Pesquisar nome, matrícula, CPF, e-mail…" value="${esc(f.busca)}"><select id="sit" aria-label="Situação"><option value="ativo" ${f.sit === 'ativo' ? 'selected' : ''}>Ativos</option><option value="inativo" ${f.sit === 'inativo' ? 'selected' : ''}>Inativos</option><option value="todos" ${f.sit === 'todos' ? 'selected' : ''}>Todos</option></select>
         <select id="cad" aria-label="Completude"><option value="">Cadastro: todos</option><option value="1" ${f.cad ? 'selected' : ''}>Só incompletos (${incompl})</option></select>
         <select id="tipo" aria-label="Tipo de cadastro"><option value="">Tipo: todos</option><option value="Gestão" ${f.tipo === 'Gestão' ? 'selected' : ''}>Gestão</option><option value="Colaborador" ${f.tipo === 'Colaborador' ? 'selected' : ''}>Colaborador</option></select><span class="sp"></span>
-        ${ed ? `<button class="btn" id="bCargos">${A.icon('edit')} Cargos</button>` : ''}${ed ? `<button class="btn" id="bImp">${A.icon('upload')} Importar planilha</button>` : ''}<button class="btn" id="bExp">${A.icon('download')} Baixar planilha</button>${ed ? `<button class="btn pri" id="novo">${A.icon('plus')} Novo cadastro</button>` : ''}</div>
-        ${incompl ? `<div class="alert warn">${A.icon('warn')}<div><b>${incompl} cadastro(s) incompleto(s).</b> Sem cargo, e-mail, matrícula, CPF, gestão e setor a pessoa não recebe avisos nem entra em MOP. Complete um a um em <b>Editar</b> ou use <b>Baixar planilha</b>, preencha e <b>Importar planilha</b>.</div></div>` : ''}
-        <div class="tablewrap"><table class="t"><thead><tr><th>Nome</th><th>Cargo</th><th>Tipo</th><th>Matrícula</th><th>Gestão</th><th>Setor</th><th>E-mail</th><th>Telefone</th><th>Regra</th><th>Situação</th><th></th></tr></thead><tbody>${lista.map((x) => { const fa = C.faltando(x, A.cargos()); const tp = C.tipoCadastro(x, A.cargos()); return `<tr><td><b>${esc(x.nome)}</b>${fa.length ? ` <span class="pill warn" title="Falta: ${esc(fa.map((k) => C.ROTULOS[k]).join(', '))}">incompleto</span>` : ''}</td><td>${esc(x.cargo || '') || '<span class="muted">—</span>'}</td><td>${tp === 'Gestão' ? '<span class="pill ok">Gestão</span>' : '<span class="small">Colaborador</span>'}</td><td>${esc(x.matricula || '') || '<span class="muted">—</span>'}</td><td>${esc(A.gestorNome(x.gestorId)) || '<span class="muted">—</span>'}</td><td>${esc(x.setor || '') || '<span class="muted">—</span>'}</td><td class="small">${esc(x.email || '') || '<span class="muted">—</span>'}</td><td class="small">${esc(C.fmtTel(x.telefone || '')) || '<span class="muted">—</span>'}</td><td class="small">${REGRA[(x.regra || {}).tipo || 'rodizio']}</td><td>${x.situacao === 'inativo' ? '<span class="pill ausente">Inativo</span>' : '<span class="pill ok">Ativo</span>'}</td><td style="white-space:nowrap">${!ed ? '' : `<button class="btn sm" data-e="${x.id}">${A.icon('edit')} Editar</button> <button class="btn sm ${x.situacao === 'inativo' ? '' : 'perigo'}" data-i="${x.id}">${x.situacao === 'inativo' ? 'Reativar' : 'Inativar'}</button>`}</td></tr>`; }).join('') || '<tr><td colspan="11" class="empty">Nenhum colaborador encontrado com os filtros atuais.</td></tr>'}</tbody></table></div>
+        ${ed ? `<button class="btn" id="bCargos">${A.icon('edit')} Cargos</button>` : ''}${ed ? `<button class="btn" id="bImp">${A.icon('upload')} Importar planilha</button>` : ''}${lim ? '' : `<button class="btn" id="bExp">${A.icon('download')} Baixar planilha</button>`}${ed ? `<button class="btn pri" id="novo">${A.icon('plus')} Novo cadastro</button>` : ''}</div>
+        ${incompl && lim ? `<div class="alert warn">${A.icon('warn')}<div><b>Seu cadastro está incompleto.</b> Os dados que faltam (setor, gestão e outros) são preenchidos por um gestor; assim que estiverem completos você passa a receber avisos e a entrar em MOP.</div></div>` : ''}${incompl && !lim ? `<div class="alert warn">${A.icon('warn')}<div><b>${incompl} cadastro(s) incompleto(s).</b> Sem cargo, e-mail, matrícula, CPF, gestão e setor a pessoa não recebe avisos nem entra em MOP. Complete um a um em <b>Editar</b> ou use <b>Baixar planilha</b>, preencha e <b>Importar planilha</b>.</div></div>` : ''}
+        <div class="tablewrap"><table class="t"><thead><tr><th>Nome</th><th>Cargo</th><th>Tipo</th><th>Matrícula</th><th>Gestão</th><th>Setor</th><th>E-mail</th><th>Telefone</th><th>Regra</th><th>Situação</th><th></th></tr></thead><tbody>${lista.map((x) => { const fa = falt(x); const tp = C.tipoCadastro(x, A.cargos()); return `<tr><td><b>${esc(x.nome)}</b>${fa.length ? ` <span class="pill warn" title="Falta: ${esc(fa.map((k) => C.ROTULOS[k]).join(', '))}">incompleto</span>` : ''}</td><td>${esc(x.cargo || '') || '<span class="muted">—</span>'}</td><td>${tp === 'Gestão' ? '<span class="pill ok">Gestão</span>' : '<span class="small">Colaborador</span>'}</td><td>${esc(x.matricula || '') || '<span class="muted">—</span>'}</td><td>${esc(A.gestorNome(x.gestorId)) || '<span class="muted">—</span>'}</td><td>${esc(x.setor || '') || '<span class="muted">—</span>'}</td><td class="small">${esc(x.email || '') || '<span class="muted">—</span>'}</td><td class="small">${esc(C.fmtTel(x.telefone || '')) || '<span class="muted">—</span>'}</td><td class="small">${REGRA[(x.regra || {}).tipo || 'rodizio']}</td><td>${x.situacao === 'inativo' ? '<span class="pill ausente">Inativo</span>' : '<span class="pill ok">Ativo</span>'}</td><td style="white-space:nowrap">${!ed ? '' : `<button class="btn sm" data-e="${x.id}">${A.icon('edit')} Editar</button> <button class="btn sm ${x.situacao === 'inativo' ? '' : 'perigo'}" data-i="${x.id}">${x.situacao === 'inativo' ? 'Reativar' : 'Inativar'}</button>`}</td></tr>`; }).join('') || '<tr><td colspan="11" class="empty">Nenhum colaborador encontrado com os filtros atuais.</td></tr>'}</tbody></table></div>
         <div class="small muted" style="margin-top:8px">${lista.length} colaborador(es) listado(s)${A.filtroAtivo() ? ' — filtro de gestão/setor ativo no topo' : ''}.</div>`;
       A.$('#q', c).oninput = (e) => { f.busca = e.target.value; const p = e.target.selectionStart; this.render(c); const q = A.$('#q', c); q.focus(); q.setSelectionRange(p, p); };
       A.$('#sit', c).onchange = (e) => { f.sit = e.target.value; this.render(c); };
       A.$('#cad', c).onchange = (e) => { f.cad = e.target.value; this.render(c); };
       A.$('#tipo', c).onchange = (e) => { f.tipo = e.target.value; this.render(c); };
       if (A.$('#bCargos', c)) A.$('#bCargos', c).onclick = () => cargosModal();
-      A.$('#bExp', c).onclick = async () => { try { A.download('Cadastro_Colaboradores.xlsx', await A.xlsxCadastro(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); } catch (e) { A.toast(e.message, 'err'); } };
+      if (A.$('#bExp', c)) A.$('#bExp', c).onclick = async () => { try { A.download('Cadastro_Colaboradores.xlsx', await A.xlsxCadastro(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); } catch (e) { A.toast(e.message, 'err'); } };
       if (A.$('#bImp', c)) A.$('#bImp', c).onclick = importar;
       if (A.$('#novo', c)) A.$('#novo', c).onclick = () => abrir(null);
       A.$$('[data-e]', c).forEach((b) => b.onclick = () => abrir(A.colab(b.dataset.e)));
@@ -2585,9 +2645,9 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   const stPill = (s) => `<span class="pill ${(ST[s] || ST.programada)[1]}">${(ST[s] || ST.programada)[0]}</span>`;
   const siglaFerias = () => (A.siglas.find((s) => s.sigla === 'FE') || A.siglas.find((s) => /f[eé]rias/i.test(s.descricao || '')) || {}).sigla || '';
   const chaveEsc = (d, id) => `${d}|${id}`;
-  /** Edição/admin: férias e MOP de qualquer pessoa. Consulta: só de si mesmo e de quem responde a ele (o banco confere de novo). */
-  const meuColab = () => (A.user && A.user.colabId) || '';
-  const podeColab = (id) => { if (A.can('edicao')) return true; const m = meuColab(); const c = A.colab(id); return !!(m && c && (c.id === m || C.cadeiaGestores(c, A._porId || new Map()).includes(m))); };
+  /** Edição/admin: férias e MOP de qualquer pessoa. Consulta: só do próprio cadastro (o banco confere de novo). */
+  const meuColab = () => A.meuColab();
+  const podeColab = (id) => { if (A.can('edicao')) return true; const m = meuColab(); return !!(m && id === m); };
   const podeAlgo = () => A.can('edicao') || !!meuColab();
   const podeMop = (m) => (m.itens || []).every((i) => podeColab(i.colabId));
 
@@ -2605,7 +2665,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       <label class="f">Retorno ao trabalho<input type="text" id="vRet" readonly></label>
       <label class="f">Abono pecuniário (vender 10 dias)<select id="vAb"><option ${v.abono !== 'Sim' ? 'selected' : ''}>Não</option><option ${v.abono === 'Sim' ? 'selected' : ''}>Sim</option></select></label>
       <label class="f">Adiantamento do 13º<select id="v13"><option ${v.adiant13 !== 'Sim' ? 'selected' : ''}>Não</option><option ${v.adiant13 === 'Sim' ? 'selected' : ''}>Sim</option></select></label>
-      ${siglaFerias() && A.can('edicao') ? `<label class="f full chk"><input type="checkbox" id="vEsc" ${v.lancaEscala ? 'checked' : ''}> Lançar “${esc(siglaFerias())}” na escala nos dias úteis do período</label>` : ''}
+      ${siglaFerias() && A.podeEscalaAlgo() ? `<label class="f full chk"><input type="checkbox" id="vEsc" ${v.lancaEscala ? 'checked' : ''}> Lançar “${esc(siglaFerias())}” na escala nos dias úteis do período</label>` : ''}
       <label class="f full">Observações<textarea id="vObs" rows="2">${esc(v.obs || '')}</textarea></label>
       <div id="vAv" class="full"></div></div>`,
     onMount: (mm) => {
@@ -2626,9 +2686,9 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       const reg = { ...(f || {}), id: f ? f.id : U.uid('fer'), colabId, inicio, dias, fim: C.fimFerias(inicio, dias), abono: g('vAb').value, adiant13: g('v13').value, obs: g('vObs').value.trim(), status: f ? f.status : 'programada', criadoEm: f ? f.criadoEm : new Date().toISOString(), criadoPor: f ? f.criadoPor : A.user.usuario };
       const lanc = g('vEsc') ? g('vEsc').checked : false; const ops = [];
       const sg = siglaFerias();
-      if (f && f.lancou && A.can('edicao')) for (const d of f.lancou) { const r = A.escalaIdx.get(d); if (r && r.get(f.colabId) === sg) ops.push({ s: 'escala', op: 'delete', k: chaveEsc(d, f.colabId) }); }
-      reg.lancou = A.can('edicao') ? [] : ((f && f.lancou) || []); // consulta não mexe na escala
-      if (lanc && sg) { reg.lancou = C.diasUteis(inicio, reg.fim); for (const d of reg.lancou) ops.push({ s: 'escala', op: 'put', v: { key: chaveEsc(d, colabId), date: d, colabId, sigla: sg, por: A.user.usuario, em: new Date().toISOString() } }); }
+      if (f && f.lancou && A.podeEscala(f.colabId)) for (const d of f.lancou) { const r = A.escalaIdx.get(d); if (r && r.get(f.colabId) === sg) ops.push({ s: 'escala', op: 'delete', k: chaveEsc(d, f.colabId) }); }
+      reg.lancou = A.podeEscala(colabId) ? [] : ((f && f.lancou) || []); // só mexe na escala de quem pode (o banco confere)
+      if (lanc && sg && A.podeEscala(colabId)) { reg.lancou = C.diasUteis(inicio, reg.fim); for (const d of reg.lancou) ops.push({ s: 'escala', op: 'put', v: { key: chaveEsc(d, colabId), date: d, colabId, sigla: sg, por: A.user.usuario, em: new Date().toISOString() } }); }
       ops.push({ s: 'ferias', op: 'put', v: reg });
       const col = A.colab(colabId);
       await A.commit(ops, { tipo: 'ferias', resumo: `Férias ${f ? 'alteradas' : 'programadas'}: ${col.nome}, ${U.fmtBR(inicio)} a ${U.fmtBR(reg.fim)}`, reversivel: true });
@@ -2641,7 +2701,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     const col = A.colab(f.colabId) || { nome: '?' };
     if (!(await A.confirm({ titulo: 'Cancelar férias', msg: `Cancelar as férias de <b>${esc(col.nome)}</b> (${U.fmtBR(f.inicio)} a ${U.fmtBR(f.fim)})?${f.status !== 'programada' ? ' <br><b>Atenção:</b> a MOP já gerada continua existindo; avise o gestor se ela já foi enviada.' : ''}`, ok: 'Cancelar férias', perigo: true }))) return;
     const ops = []; const sg = siglaFerias();
-    if (f.lancou && f.lancou.length && A.can('edicao') && (await A.confirm({ titulo: 'Escala', msg: `Remover também o lançamento “${esc(sg)}” da escala nesses ${f.lancou.length} dia(s)?`, ok: 'Remover da escala' }))) for (const d of f.lancou) { const r = A.escalaIdx.get(d); if (r && r.get(f.colabId) === sg) ops.push({ s: 'escala', op: 'delete', k: chaveEsc(d, f.colabId) }); }
+    if (f.lancou && f.lancou.length && A.podeEscala(f.colabId) && (await A.confirm({ titulo: 'Escala', msg: `Remover também o lançamento “${esc(sg)}” da escala nesses ${f.lancou.length} dia(s)?`, ok: 'Remover da escala' }))) for (const d of f.lancou) { const r = A.escalaIdx.get(d); if (r && r.get(f.colabId) === sg) ops.push({ s: 'escala', op: 'delete', k: chaveEsc(d, f.colabId) }); }
     ops.push({ s: 'ferias', op: 'put', v: { ...f, status: 'cancelada' } });
     await A.commit(ops, { tipo: 'ferias', resumo: `Férias canceladas: ${col.nome}`, reversivel: true }); A.toast('Férias canceladas.'); A.render();
   }
@@ -2786,10 +2846,10 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
   function abrir(ev, dataPadrao) {
     const novo = !ev;
-    const v = ev || { colabId: '', tipo: TIPOS[1], data: dataPadrao || A.date, inicio: '', fim: '', situacao: 'previsto', obs: '' };
+    const v = ev || { colabId: A.limitado() ? A.meuColab() : '', tipo: TIPOS[1], data: dataPadrao || A.date, inicio: '', fim: '', situacao: 'previsto', obs: '' };
     const corpo = `<div class="form">
       <label class="f">Tipo<select id="eTipo">${TIPOS.map((t) => `<option ${v.tipo === t ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
-      <label class="f">Colaborador<select id="eCol"><option value="">— evento geral —</option>${A.data.colaboradores.map((c) => `<option value="${c.id}" ${v.colabId === c.id ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select></label>
+      <label class="f">Colaborador<select id="eCol">${A.limitado() ? '' : '<option value="">— evento geral —</option>'}${A.colabsDoForm().map((c) => `<option value="${c.id}" ${v.colabId === c.id ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select></label>
       <label class="f">Data *<input type="date" id="eData" value="${v.data}"></label>
       <label class="f">Situação<select id="eSit"><option value="previsto" ${v.situacao === 'previsto' ? 'selected' : ''}>Previsto</option><option value="realizado" ${v.situacao === 'realizado' ? 'selected' : ''}>Realizado</option><option value="cancelado" ${v.situacao === 'cancelado' ? 'selected' : ''}>Cancelado</option></select></label>
       <label class="f">Horário inicial<input type="time" id="eIni" value="${v.inicio || ''}"></label>
@@ -2804,6 +2864,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     botoes.push({ label: 'Salvar', cls: 'pri', onClick: async (m) => {
       const g = (id) => A.$('#' + id, m.el).value;
       if (!g('eData')) { A.toast('Informe a data do evento.', 'warn'); return false; }
+      if (A.limitado() && !g('eCol')) { A.toast('Seu acesso ainda não está ligado a um cadastro de colaborador; peça a um gestor para completar.', 'warn'); return false; }
       if (g('eIni') && g('eFim') && g('eFim') < g('eIni')) { A.toast('O horário final é anterior ao inicial.', 'warn'); return false; }
       const reg = { ...(ev || {}), id: ev ? ev.id : U.uid('ev'), tipo: g('eTipo'), colabId: g('eCol'), data: g('eData'), inicio: g('eIni'), fim: g('eFim'), situacao: g('eSit'), obs: g('eObs'), criadoEm: ev ? ev.criadoEm : new Date().toISOString(), criadoPor: ev ? ev.criadoPor : (A.user && A.user.usuario) };
       await A.commit([{ s: 'eventos', op: 'put', v: reg }]); A.toast(novo ? 'Evento registrado.' : 'Evento atualizado.'); A.render();
@@ -2831,7 +2892,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         <select id="ft"><option value="">Todos os tipos</option>${TIPOS.map((t) => `<option ${f.tipo === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
         <select id="fc"><option value="">Todos os colaboradores</option>${A.visiveis().map((x) => `<option value="${x.id}" ${f.colabId === x.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select>
         <select id="fs"><option value="">Qualquer situação</option><option value="previsto" ${f.sit === 'previsto' ? 'selected' : ''}>Previsto</option><option value="realizado" ${f.sit === 'realizado' ? 'selected' : ''}>Realizado</option><option value="cancelado" ${f.sit === 'cancelado' ? 'selected' : ''}>Cancelado</option></select>
-        <span class="sp"></span>${A.user ? `<button class="btn pri" id="nev">${A.icon('plus')} Novo evento</button>` : ''}</div>
+        <span class="sp"></span>${A.user && (!A.limitado() || A.meuColab()) ? `<button class="btn pri" id="nev">${A.icon('plus')} Novo evento</button>` : ''}</div>
         ${cartaoAvisos()}
         <div class="cal">${cel}</div>
         <div class="card" style="margin-top:14px"><h2>Eventos do mês</h2>${lista.length ? `<div class="tablewrap"><table class="t"><thead><tr><th>Data</th><th>Horário</th><th>Tipo</th><th>Colaborador</th><th>Situação</th><th>Observação</th></tr></thead><tbody>${lista.map((e) => `<tr data-ev="${e.id}" style="cursor:pointer"><td>${U.fmtBR(e.data)}</td><td>${esc(e.inicio || '')}${e.fim ? '–' + esc(e.fim) : ''}</td><td>${esc(e.tipo)}</td><td>${esc((A.colab(e.colabId) || {}).nome || '—')}</td><td><span class="pill ${e.situacao === 'cancelado' ? 'ausente' : e.situacao === 'realizado' ? 'ok' : 'warn'}">${esc(e.situacao)}</span></td><td class="small muted">${esc(e.obs || '')}</td></tr>`).join('')}</tbody></table></div>` : '<div class="muted small">Nenhum evento neste mês. Os aniversários cadastrados aparecem automaticamente no calendário.</div>'}</div>`;
@@ -2840,7 +2901,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       A.$('#ft', c).onchange = (e) => { f.tipo = e.target.value; this.render(c); }; A.$('#fc', c).onchange = (e) => { f.colabId = e.target.value; this.render(c); }; A.$('#fs', c).onchange = (e) => { f.sit = e.target.value; this.render(c); };
       ligaAvisos(c);
       if (A.$('#nev', c)) A.$('#nev', c).onclick = () => abrir(null);
-      A.$$('.cal .d', c).forEach((d) => d.onclick = (e) => { const ev = e.target.closest('[data-ev]'); if (ev) { abrir(A.data.eventos.find((x) => x.id === ev.dataset.ev)); return; } if (A.user) abrir(null, d.dataset.d); });
+      A.$$('.cal .d', c).forEach((d) => d.onclick = (e) => { const ev = e.target.closest('[data-ev]'); if (ev) { abrir(A.data.eventos.find((x) => x.id === ev.dataset.ev)); return; } if (A.user && (!A.limitado() || A.meuColab())) abrir(null, d.dataset.d); });
       A.$$('tr[data-ev]', c).forEach((r) => r.onclick = () => abrir(A.data.eventos.find((x) => x.id === r.dataset.ev)));
     }
   };
@@ -2930,7 +2991,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   A.ui.cfgTab = 'siglas';
 
   const MANUAL = `<div class="manual card"><h2>Manual rápido</h2>
-    <h3>1. Perfis de acesso</h3><p><b>Consulta</b>: visualiza tudo, pode <b>incluir eventos</b> (altera só os que ela mesma registrou) e <b>programar férias e gerar MOP</b> dela mesma e de quem responde a ela. <b>Edição</b>: monta a escala, mexe na planta, cadastra colaboradores e gerencia todos os eventos. <b>Administrador</b>: tudo isso, mais usuários, siglas, backup e restauração. O perfil é definido pelo administrador, independente do cargo. Quem faz o <b>primeiro acesso</b> (e-mail, matrícula e CPF) entra direto se já estiver no cadastro ou num acesso criado antes; se algum dado for novo, um <b>gestor</b> aprova em Configurações &gt; Solicitações de acesso. Cada pessoa entra com seu próprio usuário e senha.</p>
+    <h3>1. Perfis de acesso</h3><p><b>Consulta</b>: enxerga <b>apenas os próprios dados</b> (o restante fica privado) e, só em nome próprio, monta a <b>própria escala</b>, <b>inclui eventos</b> (altera só os que ela mesma registrou) e <b>programa férias e gera MOP</b>; nos formulários de evento e de MOP aparece somente o próprio perfil. Quem tem o cargo <b>Analista III</b> (e setor definido no cadastro) também enxerga e altera a <b>escala do próprio setor</b>, e só dela. <b>Edição</b>: acesso livre — monta a escala de todos, mexe na planta, cadastra colaboradores e gerencia todos os eventos. <b>Administrador</b>: tudo isso, mais usuários, siglas, backup e restauração. O perfil é definido pelo administrador, independente do cargo; para gerentes terem acesso livre, o perfil deles deve ser Edição ou Administrador. No <b>primeiro acesso</b> a pessoa informa identificação e cargo (nome, cargo, matrícula, CPF, admissão, aniversário) e contato (e-mail, telefone); o restante do cadastro (gestão, setor, centro de custo etc.) é preenchido por um gestor. Entra direto se já estiver no cadastro ou num acesso criado antes; se algum dado for novo, um <b>gestor</b> aprova em Configurações &gt; Solicitações de acesso. Cada pessoa entra com seu próprio usuário e senha.</p>
     <h3>2. Montar a escala</h3><p>Em <b>Escala</b>, clique em <b>Editar escala</b>, escolha o pincel (uma sigla) e clique ou arraste sobre as células. Clique no número do dia para aplicar a todos. <b>Gerar por rodízio</b> distribui os dias presenciais automaticamente conforme as regras de cada colaborador. <b>Repetir semana</b> copia uma semana para as próximas. Tudo pode ser desfeito com <b>Desfazer</b>.</p>
     <h3>3. Siglas</h3><p>Em <b>Configurações &gt; Siglas</b> você pode criar, renomear, recolorir, trocar a classificação ou excluir qualquer sigla. Ao renomear, a escala já lançada acompanha o novo nome. Ao excluir uma sigla em uso, você escolhe por qual outra substituir (ou apaga os lançamentos).</p>
     <h3>4. Planta</h3><p><b>Disposição padrão</b> vale para todos os dias (a planta se repete automaticamente). <b>Ajuste do dia</b> vale só para a data. Clique numa cadeira para atribuir; arraste uma cadeira ocupada sobre outra para trocar. Quem está em home office ou ausente nunca ocupa a cadeira no dia.</p>
@@ -3048,7 +3109,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     let lista; try { lista = (await API.solicitacoes()).solicitacoes; } catch (e) { t.innerHTML = `<div class="alert err">${A.icon('warn')}<div>${esc(e.message)}</div></div>`; return; }
     const MOT = { 'e-mail fora do cadastro': 'E-mail que não está no cadastro', 'cadastro inativo': 'Cadastro inativo', 'matrícula': 'Matrícula diferente do cadastro (ou não cadastrada)', 'CPF': 'CPF diferente do cadastro (ou não cadastrado)', 'nome': 'Nome diferente do cadastro' };
     t.innerHTML = `<div class="help">Quem faz o primeiro acesso com dados que já estavam no cadastro entra direto. Se algum dado não conferir, o pedido fica aqui até um <b>gestor</b> (ou administrador) aprovar. Aprovado, a pessoa entra com o perfil <b>Consulta</b>; o administrador pode mudar o perfil em Usuários. Recuse se não reconhecer a pessoa.</div>
-      ${lista.length ? `<div class="tablewrap"><table class="t"><thead><tr><th>Nome</th><th>E-mail</th><th>Matrícula</th><th>CPF</th><th>O que não conferiu</th><th>Pedido em</th><th></th></tr></thead><tbody>${lista.map((s) => `<tr><td><b>${esc(s.nome)}</b></td><td class="small">${esc(s.email)}</td><td>${esc(s.matricula)}</td><td class="small">${esc(E.Cad.fmtCpf(s.cpf))}</td><td class="small">${esc((s.divergencias || []).map((d) => MOT[d] || d).join(' · '))}</td><td class="small">${esc(new Date(s.criadoEm).toLocaleString('pt-BR'))}</td><td style="white-space:nowrap"><button class="btn sm pri" data-ap="${s.id}">Aprovar</button> <button class="btn sm perigo" data-rc="${s.id}">Recusar</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhuma solicitação aguardando aprovação.</div>'}`;
+      ${lista.length ? `<div class="tablewrap"><table class="t"><thead><tr><th>Nome</th><th>E-mail</th><th>Matrícula</th><th>CPF</th><th>Cargo</th><th>Admissão · Aniversário</th><th>Telefone</th><th>O que não conferiu</th><th>Pedido em</th><th></th></tr></thead><tbody>${lista.map((s) => `<tr><td><b>${esc(s.nome)}</b></td><td class="small">${esc(s.email)}</td><td>${esc(s.matricula)}</td><td class="small">${esc(E.Cad.fmtCpf(s.cpf))}</td><td>${esc(s.cargo || '') || '<span class="muted">—</span>'}</td><td class="small">${esc(s.admissao ? U.fmtBR(s.admissao) : '—')} · ${esc(s.aniversario ? U.fmtBR(s.aniversario) : '—')}</td><td class="small">${esc(s.telefone ? E.Cad.fmtTel(s.telefone) : '—')}</td><td class="small">${esc((s.divergencias || []).map((d) => MOT[d] || d).join(' · '))}</td><td class="small">${esc(new Date(s.criadoEm).toLocaleString('pt-BR'))}</td><td style="white-space:nowrap"><button class="btn sm pri" data-ap="${s.id}">Aprovar</button> <button class="btn sm perigo" data-rc="${s.id}">Recusar</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Nenhuma solicitação aguardando aprovação.</div>'}`;
     const decide = async (id, aprovar, nome) => {
       if (!aprovar && !(await A.confirm({ titulo: 'Recusar acesso', msg: `Recusar o pedido de <b>${esc(nome)}</b>? O pedido é apagado e a pessoa poderá pedir de novo.`, ok: 'Recusar', perigo: true }))) return;
       try { await API.decidirAcesso(id, aprovar); await A.load(); A.refreshBell(); A.toast(aprovar ? 'Acesso aprovado.' : 'Pedido recusado.'); redraw(); } catch (e) { A.toast(e.message, 'err'); }
@@ -3128,6 +3189,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   /* ---------- telas de acesso ---------- */
   function telaAcesso(modo, aviso) {
     const setup = modo === 'setup'; const primeiro = modo === 'acesso'; const C = E.Cad;
+    const completo = primeiro && E.ONLINE; // online: o cadastro nasce com identificação, cargo e contato
     if (modo === 'pendente') {
       document.body.innerHTML = `<div class="loginpage"><div class="logincard"><div class="lg">${E.LOGO}</div><h1>Acesso solicitado</h1>
         <p class="s">Recebemos o seu pedido. Como alguns dados ainda não estavam no pré-cadastro, <b>um gestor precisa aprovar</b> antes de você entrar. Depois da aprovação, entre com o seu e-mail e a senha que você criou.</p>
@@ -3137,9 +3199,13 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     document.body.innerHTML = `<div class="loginpage"><form class="logincard" id="lf" autocomplete="on">
       <div class="lg">${E.LOGO}</div><h1>${setup ? 'Primeiro acesso' : primeiro ? 'Criar meu acesso' : 'Escala e ocupação'}</h1>
       <p class="s">${setup ? 'Crie o usuário administrador do sistema.' : primeiro ? 'Informe seus dados. Se você já estiver no pré-cadastro, o acesso é liberado na hora; se algum dado não conferir, um gestor precisa aprovar.' : (E.ONLINE ? 'Entre com o seu e-mail e a sua senha.' : 'Entre com seu e-mail (ou usuário) e senha.')}</p>${aviso ? `<div class="ok-msg" role="status">${esc(aviso)}</div>` : ''}<div id="lerr"></div>
+      ${completo ? '<p class="sec">Identificação e cargo</p>' : ''}
       ${setup || primeiro ? '<label>Nome completo<input id="lnome" type="text" autocomplete="name" required maxlength="80"></label>' : ''}
-      ${setup || primeiro ? '<label>E-mail <span class="muted small">(vincula o seu acesso ao cadastro)</span><input id="lmail" type="email" autocomplete="email" required maxlength="160" placeholder="nome@empresa.com.br"></label>' : ''}
+      ${completo ? '<label>Cargo<select id="lcargo" required><option value="">Carregando…</option></select><span class="muted small" style="display:block;font-weight:400;margin-top:4px">Cargos de gestão (supervisor, gerente) dependem da aprovação de um gestor.</span></label>' : ''}
       ${primeiro ? '<label>Matrícula<input id="lmat" type="text" inputmode="numeric" required maxlength="20" autocomplete="off"></label><label>CPF<input id="lcpf" type="text" inputmode="numeric" required maxlength="14" placeholder="000.000.000-00" autocomplete="off"></label>' : ''}
+      ${completo ? '<label>Data de admissão<input id="ladm" type="date" required min="1900-01-01"></label><label>Data de aniversário<input id="lani" type="date" required min="1900-01-01" max="' + U.todayIso() + '"></label><p class="sec">Contato</p>' : ''}
+      ${setup || primeiro ? '<label>E-mail <span class="muted small">(vincula o seu acesso ao cadastro)</span><input id="lmail" type="email" autocomplete="email" required maxlength="160" placeholder="nome@empresa.com.br"></label>' : ''}
+      ${completo ? '<label>Telefone / celular<input id="ltel" type="text" inputmode="tel" required maxlength="15" placeholder="(00) 00000-0000" autocomplete="tel"></label><p class="sec">Acesso</p>' : ''}
       ${primeiro || (setup && E.ONLINE) ? '' : `<label>${setup ? 'Usuário' : E.ONLINE ? 'E-mail' : 'E-mail ou usuário'}<input id="lu" type="text" autocomplete="username" autocapitalize="off" required></label>`}
       <label>Senha<input id="ls" type="password" autocomplete="${setup || primeiro ? 'new-password' : 'current-password'}" required></label>
       ${setup || primeiro ? `<label>Repita a senha<input id="ls2" type="password" autocomplete="new-password" required></label><p class="s" style="text-align:left">Mínimo de 8 caracteres.${setup ? ' Guarde esta senha: ela dá acesso total ao sistema.' : ''}</p>` : ''}
@@ -3149,6 +3215,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     (A.$('#lnome') || A.$('#lu')).focus();
     if (A.$('#lalt')) A.$('#lalt').onclick = (e) => { e.preventDefault(); telaAcesso(primeiro ? 'login' : 'acesso'); };
     if (A.$('#lcpf')) A.$('#lcpf').oninput = (e) => { e.target.value = C.fmtCpf(e.target.value); };
+    if (A.$('#ltel')) A.$('#ltel').oninput = (e) => { e.target.value = C.fmtTel(e.target.value); };
+    if (A.$('#lcargo') && API.cargos) API.cargos().then((l) => { const sel = A.$('#lcargo'); if (sel) sel.innerHTML = '<option value="">Selecione…</option>' + l.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join(''); });
     A.$('#lf').onsubmit = async (ev) => {
       ev.preventDefault(); err('');
       const s = A.$('#ls').value;
@@ -3156,7 +3224,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         if (setup || primeiro) if (s !== A.$('#ls2').value) return err('As senhas não conferem.');
         if (setup) await API.setup({ usuario: A.$('#lu') ? A.$('#lu').value.trim() : '', senha: s, nome: A.$('#lnome').value, email: A.$('#lmail').value });
         else if (primeiro) {
-          const r = await API.acesso({ nome: A.$('#lnome').value, email: A.$('#lmail').value, matricula: A.$('#lmat').value, cpf: A.$('#lcpf').value, senha: s });
+          const r = await API.acesso({ nome: A.$('#lnome').value, email: A.$('#lmail').value, matricula: A.$('#lmat').value, cpf: A.$('#lcpf').value, senha: s,
+            ...(completo ? { cargo: A.$('#lcargo').value, admissao: A.$('#ladm').value, aniversario: A.$('#lani').value, telefone: A.$('#ltel').value } : {}) });
           if (r.pendente) return telaAcesso('pendente');
         } else await API.login(A.$('#lu').value.trim(), s);
         await iniciar();
@@ -3181,7 +3250,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   }
 
   function shell() {
-    const nav = [['geral', 'home', 'Visão geral'], ['escala', 'cal', 'Escala'], ['planta', 'map', 'Planta'], ['colabs', 'users', 'Colaboradores'], ['ferias', 'sun', 'Férias'], ['eventos', 'event', 'Eventos'], ['relatorios', 'chart', 'Indicadores'], ['config', 'cog', 'Configurações']];
+    const nav = [['geral', 'home', 'Visão geral'], ['escala', 'cal', 'Escala'], ['planta', 'map', 'Planta'], ['colabs', 'users', 'Colaboradores'], ['ferias', 'sun', 'Férias'], ['eventos', 'event', 'Eventos'], ['relatorios', 'chart', 'Indicadores'], ['config', 'cog', 'Configurações']].filter(([k]) => !(A.limitado() && k === 'relatorios')); // indicadores do escritório todo não fazem sentido com dados parciais
     document.body.innerHTML = `<div id="app">
       <aside class="side"><div class="logo">${E.LOGO}<div class="prod">Escala e ocupação</div></div>
         <nav class="nav" aria-label="Menu principal">${nav.map(([k, i, l]) => `<button data-v="${k}">${A.icon(i)}<span>${l}</span></button>`).join('')}</nav>
@@ -3221,6 +3290,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   /** Barra de filtros globais: Gestão e Setor valem para todas as telas de lista e indicadores. */
   A.refreshFiltros = () => {
     const box = A.$('#filtros'); if (!box) return;
+    if (A.limitado()) { A.filtro = { gestor: '', setor: '' }; box.innerHTML = ''; return; } // com dados só seus, filtrar por gestão/setor não se aplica
     const gs = (A.data.gestores || []).filter((g) => g.gerente && (g.ativo !== false || g.id === A.filtro.gestor)).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
     if (A.filtro.gestor && !gs.some((g) => g.id === A.filtro.gestor)) A.filtro.gestor = '';
     const ss = A.setores(); if (A.filtro.setor && !ss.some((x) => U.normName(x) === U.normName(A.filtro.setor))) A.filtro.setor = '';
