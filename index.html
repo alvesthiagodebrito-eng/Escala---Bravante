@@ -1726,7 +1726,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       const draw = () => {
         const y = Number(A.date.slice(0, 4)), m = Number(A.date.slice(5, 7));
         const anos = [...new Set([...A.datasComEscala().map((k) => Number(k.slice(0, 4))), y - 1, y, y + 1])].sort();
-        const colabsF = A.visiveisEscala().filter((x) => (f.edit || x.situacao !== 'inativo' || f.situacao === 'inativos') && (!f.colabId || x.id === f.colabId) && (!f.busca || U.normName(x.nome).includes(U.normName(f.busca))));
+        /* só quem está ativo no cadastro de colaboradores aparece na escala (inativos saem, mesmo no modo de edição) */
+        const colabsF = A.visiveisEscala().filter((x) => x.situacao !== 'inativo' && (!f.colabId || x.id === f.colabId) && (!f.busca || U.normName(x.nome).includes(U.normName(f.busca))));
         let dias;
         if (f.modo === 'dia') dias = [A.date]; else if (f.modo === 'semana') dias = U.range(U.startOfWeek(A.date), U.addDays(U.startOfWeek(A.date), 6));
         else dias = U.range(U.mkIso(y, m, 1), U.mkIso(y, m, U.daysInMonth(y, m)));
@@ -1745,7 +1746,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
             const cad = invEff.get(x.id); const cd = cad && A.cadeira(cad);
             const pos = cl === 'presencial' ? (cd ? `<b>${esc(cd.rotulo)}</b> <span class="muted small">${esc(cd.zona)}</span>` : '<span class="pill warn">sem cadeira</span>') : (cd ? `<span class="muted small">titular de ${esc(cd.rotulo)}</span>` : '<span class="muted">—</span>');
             const cel = A.podeEscala(x.id) ? `<select data-sel="${x.id}" aria-label="Sigla de ${esc(x.nome)}">${opcoesSigla.replace(`value="${esc(r ? r.sigla : '§')}"`, `value="${esc(r ? r.sigla : '§')}" selected`)}</select>` : A.pillSigla(r && r.sigla, cl);
-            return `<tr><td><b>${esc(x.nome)}</b>${x.situacao === 'inativo' ? ' <span class="pill ausente">inativo</span>' : ''}</td><td>${cel}</td><td>${r ? esc(cl === 'ausente' && A.siglasMap[r.sigla] && A.siglasMap[r.sigla].sensivel && A.privado ? 'Ausente' : (A.siglasMap[r.sigla] ? A.siglasMap[r.sigla].descricao : 'Sigla não reconhecida')) : '<span class="muted">sem escala</span>'}</td><td>${pos}</td><td class="small muted">${r && r.por ? `${esc(r.por)} · ${new Date(r.em).toLocaleString('pt-BR')}` : '—'}</td></tr>`;
+            return `<tr><td><b>${esc(x.nome)}</b></td><td>${cel}</td><td>${r ? esc(cl === 'ausente' && A.siglasMap[r.sigla] && A.siglasMap[r.sigla].sensivel && A.privado ? 'Ausente' : (A.siglasMap[r.sigla] ? A.siglasMap[r.sigla].descricao : 'Sigla não reconhecida')) : '<span class="muted">sem escala</span>'}</td><td>${pos}</td><td class="small muted">${r && r.por ? `${esc(r.por)} · ${new Date(r.em).toLocaleString('pt-BR')}` : '—'}</td></tr>`;
           }).join('') || '<tr><td colspan="5" class="empty">Nenhum colaborador encontrado com estes filtros.</td></tr>'}</tbody></table></div>`;
         } else {
           corpo = `<div class="tablewrap"><table class="matrix ${f.edit ? 'editing' : ''}" id="mx"><thead><tr><th class="nm">Colaborador</th>${dias.map((d) => { const w = U.weekday(d); return `<th class="${w % 6 === 0 ? 'fds' : ''} ${d === A.date ? 'sel' : ''} ${f.edit ? 'hd-edit' : ''}" data-hd="${d}" title="${f.edit ? 'Aplicar a ferramenta a todos neste dia' : U.fmtBR(d)}">${Number(d.slice(8))}<small>${U.WEEKDAY_LABEL[w]}</small></th>`; }).join('')}</tr></thead><tbody>${linhas.map((x) => `<tr><td class="nm">${esc(x.nome)}</td>${dias.map((d) => {
@@ -1765,7 +1766,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
             <div class="seg" id="modo">${[['dia', 'Dia'], ['semana', 'Semana'], ['mes', 'Mês']].map(([k, l]) => `<button data-m="${k}" class="${f.modo === k ? 'on' : ''}">${l}</button>`).join('')}</div>
             ${f.modo === 'mes' ? `<select id="selMes" aria-label="Mês">${U.MONTHS.map((n, i) => `<option value="${i + 1}" ${i + 1 === m ? 'selected' : ''}>${n}</option>`).join('')}</select><select id="selAno" aria-label="Ano">${anos.map((a) => `<option ${a === y ? 'selected' : ''}>${a}</option>`).join('')}</select>` : ''}
             <input type="search" id="busca" placeholder="Pesquisar nome…" value="${esc(f.busca)}" aria-label="Pesquisar por nome">
-            <select id="fCol" aria-label="Colaborador"><option value="">Todos os colaboradores</option>${A.visiveisEscala().map((x) => `<option value="${x.id}" ${f.colabId === x.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select>
+            <select id="fCol" aria-label="Colaborador"><option value="">Todos os colaboradores</option>${A.visiveisEscala().filter((x) => x.situacao !== 'inativo').map((x) => `<option value="${x.id}" ${f.colabId === x.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select>
             <select id="fSit" aria-label="Situação"><option value="">Todas as situações</option>${['presencial', 'home', 'ausente', 'pendente', 'desconhecido'].map((k) => `<option value="${k}" ${f.situacao === k ? 'selected' : ''}>${A.classeRotulo(k)}</option>`).join('')}<option value="sem" ${f.situacao === 'sem' ? 'selected' : ''}>Sem escala</option></select>
             ${f.modo !== 'dia' ? `<span class="sp"></span><button class="btn sm" id="navP" aria-label="Anterior">${A.icon('left')}</button><button class="btn sm" id="navN" aria-label="Próximo">${A.icon('right')}</button>` : ''}
           </div>
@@ -2601,6 +2602,25 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     };
   }
 
+  /** Exclui o cadastro de vez, com o que depende dele: escala, posições na planta, programações de férias sem MOP e eventos da pessoa. MOPs já geradas ficam (são documentos). Dá para desfazer em seguida. */
+  async function excluir(x, depois) {
+    if (!x) return;
+    if (x.id === A.meuColab()) { A.toast('Você não pode excluir o seu próprio cadastro.', 'warn'); return; }
+    const d = A.data; const esc_ = d.escala.filter((r) => r.colabId === x.id); const atr = d.atribuicoes.filter((a) => a.colabId === x.id);
+    const fer = d.ferias.filter((f) => f.colabId === x.id); const ferApaga = fer.filter((f) => f.status === 'programada' || f.status === 'cancelada'); const evs = d.eventos.filter((e) => e.colabId === x.id);
+    const equipe = d.colaboradores.filter((c) => c.gestorId === x.id);
+    const linhas = [[esc_.length, 'lançamento(s) de escala'], [atr.length, 'posição(ões) na planta'], [ferApaga.length, 'programação(ões) de férias sem MOP'], [evs.length, 'evento(s)']].filter(([n]) => n);
+    const msg = `Excluir <b>${esc(x.nome)}</b> definitivamente?${linhas.length ? `<br>Também serão apagados: ${linhas.map(([n, t]) => `<b>${n}</b> ${t}`).join(', ')}.` : ''}${fer.length > ferApaga.length ? '<br>As férias que já viraram MOP e as MOPs geradas são mantidas.' : ''}${equipe.length ? `<br><b>${equipe.length}</b> pessoa(s) respondiam a ele(a) e ficarão sem gestão.` : ''}<br>Se a pessoa tem acesso ao painel, desative-a antes em Configurações › Usuários. Para só tirar da escala e dos indicadores, prefira <b>Inativar</b>. Dá para desfazer logo em seguida na tela Escala.`;
+    if (!(await A.confirm({ titulo: 'Excluir cadastro', msg, ok: 'Excluir', perigo: true }))) return;
+    const ops = [{ s: 'colaboradores', op: 'delete', k: x.id }];
+    for (const r of esc_) ops.push({ s: 'escala', op: 'delete', k: r.key });
+    for (const a of atr) ops.push({ s: 'atribuicoes', op: 'delete', k: a.id });
+    for (const f of ferApaga) ops.push({ s: 'ferias', op: 'delete', k: f.id });
+    for (const e of evs) ops.push({ s: 'eventos', op: 'delete', k: e.id });
+    for (const c of equipe) ops.push({ s: 'colaboradores', op: 'put', v: { ...c, gestorId: '' } });
+    await A.commit(ops, { tipo: 'cadastro', resumo: 'Excluiu o cadastro de ' + x.nome, reversivel: true }); A.toast('Cadastro excluído.'); depois();
+  }
+
   /* =============== tela =============== */
   A.views.colabs = {
     render(c) {
@@ -2614,7 +2634,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         <select id="tipo" aria-label="Tipo de cadastro"><option value="">Tipo: todos</option><option value="Gestão" ${f.tipo === 'Gestão' ? 'selected' : ''}>Gestão</option><option value="Colaborador" ${f.tipo === 'Colaborador' ? 'selected' : ''}>Colaborador</option></select><span class="sp"></span>
         ${ed ? `<button class="btn" id="bCargos">${A.icon('edit')} Cargos</button>` : ''}${ed ? `<button class="btn" id="bImp">${A.icon('upload')} Importar planilha</button>` : ''}${lim ? '' : `<button class="btn" id="bExp">${A.icon('download')} Baixar planilha</button>`}${ed ? `<button class="btn pri" id="novo">${A.icon('plus')} Novo cadastro</button>` : ''}</div>
         ${incompl && lim ? `<div class="alert warn">${A.icon('warn')}<div><b>Seu cadastro está incompleto.</b> Os dados que faltam (setor, gestão e outros) são preenchidos por um gestor; assim que estiverem completos você passa a receber avisos e a entrar em MOP.</div></div>` : ''}${incompl && !lim ? `<div class="alert warn">${A.icon('warn')}<div><b>${incompl} cadastro(s) incompleto(s).</b> Sem cargo, e-mail, matrícula, CPF, gestão e setor a pessoa não recebe avisos nem entra em MOP. Complete um a um em <b>Editar</b> ou use <b>Baixar planilha</b>, preencha e <b>Importar planilha</b>.</div></div>` : ''}
-        <div class="tablewrap"><table class="t"><thead><tr><th>Nome</th><th>Cargo</th><th>Tipo</th><th>Matrícula</th><th>Gestão</th><th>Setor</th><th>E-mail</th><th>Telefone</th><th>Regra</th><th>Situação</th><th></th></tr></thead><tbody>${lista.map((x) => { const fa = falt(x); const tp = C.tipoCadastro(x, A.cargos()); return `<tr><td><b>${esc(x.nome)}</b>${fa.length ? ` <span class="pill warn" title="Falta: ${esc(fa.map((k) => C.ROTULOS[k]).join(', '))}">incompleto</span>` : ''}</td><td>${esc(x.cargo || '') || '<span class="muted">—</span>'}</td><td>${tp === 'Gestão' ? '<span class="pill ok">Gestão</span>' : '<span class="small">Colaborador</span>'}</td><td>${esc(x.matricula || '') || '<span class="muted">—</span>'}</td><td>${esc(A.gestorNome(x.gestorId)) || '<span class="muted">—</span>'}</td><td>${esc(x.setor || '') || '<span class="muted">—</span>'}</td><td class="small">${esc(x.email || '') || '<span class="muted">—</span>'}</td><td class="small">${esc(C.fmtTel(x.telefone || '')) || '<span class="muted">—</span>'}</td><td class="small">${REGRA[(x.regra || {}).tipo || 'rodizio']}</td><td>${x.situacao === 'inativo' ? '<span class="pill ausente">Inativo</span>' : '<span class="pill ok">Ativo</span>'}</td><td style="white-space:nowrap">${!ed ? '' : `<button class="btn sm" data-e="${x.id}">${A.icon('edit')} Editar</button> <button class="btn sm ${x.situacao === 'inativo' ? '' : 'perigo'}" data-i="${x.id}">${x.situacao === 'inativo' ? 'Reativar' : 'Inativar'}</button>`}</td></tr>`; }).join('') || '<tr><td colspan="11" class="empty">Nenhum colaborador encontrado com os filtros atuais.</td></tr>'}</tbody></table></div>
+        <div class="tablewrap"><table class="t"><thead><tr><th>Nome</th><th>Cargo</th><th>Tipo</th><th>Matrícula</th><th>Gestão</th><th>Setor</th><th>E-mail</th><th>Telefone</th><th>Regra</th><th>Situação</th><th></th></tr></thead><tbody>${lista.map((x) => { const fa = falt(x); const tp = C.tipoCadastro(x, A.cargos()); return `<tr><td><b>${esc(x.nome)}</b>${fa.length ? ` <span class="pill warn" title="Falta: ${esc(fa.map((k) => C.ROTULOS[k]).join(', '))}">incompleto</span>` : ''}</td><td>${esc(x.cargo || '') || '<span class="muted">—</span>'}</td><td>${tp === 'Gestão' ? '<span class="pill ok">Gestão</span>' : '<span class="small">Colaborador</span>'}</td><td>${esc(x.matricula || '') || '<span class="muted">—</span>'}</td><td>${esc(A.gestorNome(x.gestorId)) || '<span class="muted">—</span>'}</td><td>${esc(x.setor || '') || '<span class="muted">—</span>'}</td><td class="small">${esc(x.email || '') || '<span class="muted">—</span>'}</td><td class="small">${esc(C.fmtTel(x.telefone || '')) || '<span class="muted">—</span>'}</td><td class="small">${REGRA[(x.regra || {}).tipo || 'rodizio']}</td><td>${x.situacao === 'inativo' ? '<span class="pill ausente">Inativo</span>' : '<span class="pill ok">Ativo</span>'}</td><td style="white-space:nowrap">${!ed ? '' : `<button class="btn sm" data-e="${x.id}">${A.icon('edit')} Editar</button> <button class="btn sm ${x.situacao === 'inativo' ? '' : 'perigo'}" data-i="${x.id}">${x.situacao === 'inativo' ? 'Reativar' : 'Inativar'}</button> <button class="btn sm perigo" data-del="${x.id}" title="Excluir o cadastro definitivamente">${A.icon('trash')} Excluir</button>`}</td></tr>`; }).join('') || '<tr><td colspan="11" class="empty">Nenhum colaborador encontrado com os filtros atuais.</td></tr>'}</tbody></table></div>
         <div class="small muted" style="margin-top:8px">${lista.length} colaborador(es) listado(s)${A.filtroAtivo() ? ' — filtro de gestão/setor ativo no topo' : ''}.</div>`;
       A.$('#q', c).oninput = (e) => { f.busca = e.target.value; const p = e.target.selectionStart; this.render(c); const q = A.$('#q', c); q.focus(); q.setSelectionRange(p, p); };
       A.$('#sit', c).onchange = (e) => { f.sit = e.target.value; this.render(c); };
@@ -2625,6 +2645,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       if (A.$('#bImp', c)) A.$('#bImp', c).onclick = importar;
       if (A.$('#novo', c)) A.$('#novo', c).onclick = () => abrir(null);
       A.$$('[data-e]', c).forEach((b) => b.onclick = () => abrir(A.colab(b.dataset.e)));
+      A.$$('[data-del]', c).forEach((b) => b.onclick = () => excluir(A.colab(b.dataset.del), () => this.render(c)));
       A.$$('[data-i]', c).forEach((b) => b.onclick = async () => {
         const x = A.colab(b.dataset.i); const ina = x.situacao !== 'inativo';
         if (ina && !(await A.confirm({ titulo: 'Inativar cadastro', msg: `Inativar <b>${esc(x.nome)}</b>? Ele deixa de ser contado nos indicadores e na planta; o histórico da escala é mantido.`, ok: 'Inativar', perigo: true }))) return;
