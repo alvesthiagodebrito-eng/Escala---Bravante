@@ -297,6 +297,7 @@ table.t tbody tr:hover td { background: var(--primaria-50); }
 .logincard .ok-msg { color: var(--primaria-700); background: var(--primaria-100); border-radius: var(--raio-md); padding: 9px 12px; font-size: 12.5px; margin-bottom: 14px; }
 .logincard a { color: var(--primaria-700); font-weight: 600; }
 .menu.avisos .it.act { cursor: pointer; font-weight: 600; } .menu.avisos .it.act:hover { background: var(--primaria-100); }
+.pill.gest { background: #D6E3F0; color: #1F4468; border-radius: var(--pill); padding: 2px 9px; font-size: 11px; font-weight: 700; white-space: nowrap; }
 
 </style>
 </head>
@@ -552,12 +553,14 @@ table.t tbody tr:hover td { background: var(--primaria-50); }
       const cl = D.classeDe(r.sigla, S.siglas);
       cont[cl] = (cont[cl] || 0) + 1; porColab.set(c.id, { classe: cl, sigla: r.sigla });
     }
-    const cap = S.cadeiras.filter((c) => c.tipo !== 'indisponivel');
+    // mesas de gestão (tipo 'gestao') e posições indisponíveis ficam fora da capacidade do rodízio
+    const cap = S.cadeiras.filter((c) => c.tipo !== 'indisponivel' && c.tipo !== 'gestao');
     const eff = D.efetivas(S.atribIdx, date);
     let ocupadas = 0; const sentados = new Set();
-    for (const cad of cap) {
+    for (const cad of S.cadeiras) {
       const col = eff.get(cad.id);
-      if (col && porColab.has(col) && porColab.get(col).classe === 'presencial') { ocupadas++; sentados.add(col); }
+      if (!(col && porColab.has(col) && porColab.get(col).classe === 'presencial')) continue;
+      sentados.add(col); if (cad.tipo !== 'indisponivel' && cad.tipo !== 'gestao') ocupadas++;
     }
     const semPosicao = ativos.filter((c) => porColab.get(c.id).classe === 'presencial' && !sentados.has(c.id));
     return { date, total: ativos.length, ...cont, temEscala: dia.size > 0, capacidade: cap.length, ocupadas, livres: cap.length - ocupadas, semPosicao, porColab, eff };
@@ -1313,6 +1316,14 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   A.colab = (id) => A.data.colaboradores.find((c) => c.id === id);
   A.cadeira = (id) => A.data.cadeiras.find((c) => c.id === id);
   A.ativos = (todos) => (todos ? A.data.colaboradores : A.visiveis()).filter((c) => c.situacao !== 'inativo' && !A.foraEscala(c));
+  /** Pessoas de gestão: não seguem a escala (regra "Fora da escala") ou têm cargo de gestão. Sentam em mesas de gestão. */
+  A.gestaoPlanta = (todos) => (todos ? A.data.colaboradores : A.visiveis()).filter((c) => c.situacao !== 'inativo' && (A.foraEscala(c) || A.ehGestor(c)));
+  /** Regras de ocupação: mesa de gestão só para gestão; quem está fora da escala só senta em mesa de gestão. */
+  A.podeSentar = (cad, c) => {
+    if (!c) return true;
+    if (cad.tipo === 'gestao') return A.foraEscala(c) || A.ehGestor(c);
+    return !A.foraEscala(c);
+  };
   A.datasComEscala = () => [...A.escalaIdx.keys()].sort();
 
   A.escolheDataInicial = () => {
@@ -1671,7 +1682,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     const y = Number(A.date.slice(0, 4)), mo = Number(A.date.slice(5, 7));
     const sp = A.siglas.filter((s) => s.classe === 'presencial'), sh = A.siglas.filter((s) => s.classe === 'home');
     if (!sp.length || !sh.length) { A.toast('Cadastre ao menos uma sigla de classe Presencial e uma de Home office em Configurações > Siglas.', 'warn'); return; }
-    const capPadrao = A.data.cadeiras.filter((c) => c.tipo !== 'indisponivel').length;
+    const capPadrao = A.data.cadeiras.filter((c) => c.tipo !== 'indisponivel' && c.tipo !== 'gestao').length;
     const opt = (l) => l.map((s) => `<option value="${esc(s.sigla)}">${esc(s.sigla)} — ${esc(s.descricao)}</option>`).join('');
     let ultimo = null;
     const m = A.modal({ titulo: 'Gerar escala por rodízio', size: 'lg', corpo: `<div class="help">Distribui os dias presenciais de forma justa: quem esteve menos vezes no escritório vem primeiro. Respeita as regras de cada colaborador (cadastro), <b>nunca altera</b> férias, folgas, licenças ou dias “a confirmar”, e pode ser desfeito em seguida.</div>
@@ -1840,6 +1851,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   function estadoCadeira(cad, eff, ind) {
     if (cad.tipo === 'indisponivel') return { e: 'indisp' };
     const colId = eff.get(cad.id); const col = colId && A.colab(colId);
+    if (cad.tipo === 'gestao') return !col || col.situacao === 'inativo' ? { e: 'gestaoLivre' } : { e: 'gestao', col };
     if (!col || col.situacao === 'inativo') return { e: 'livre' };
     const info = ind.porColab.get(colId);
     if (info && info.classe === 'presencial') return { e: 'ocupada', col };
@@ -1888,7 +1900,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       ${st.escopo === 'dia' ? `<button class="btn" id="limpaDia" title="Volta este dia à disposição padrão">Remover ajustes do dia</button>` : ''}
       <span class="sp"></span>
       <label class="chk"><input type="checkbox" id="lay" ${st.layout ? 'checked' : ''}> Editar layout</label>
-      ${st.layout ? `<button class="btn ${st.ferramenta === 'cadeira' ? 'on' : ''}" id="tCad">${A.icon('plus')} Cadeira</button><button class="btn ${st.ferramenta === 'ronda' ? 'on' : ''}" id="tRon">${A.icon('plus')} Posição de ronda</button><button class="btn ${st.ferramenta === 'mesa' ? 'on' : ''}" id="tMesa">${A.icon('plus')} Mesa</button>` : ''}
+      ${st.layout ? `<button class="btn ${st.ferramenta === 'cadeira' ? 'on' : ''}" id="tCad">${A.icon('plus')} Cadeira</button><button class="btn ${st.ferramenta === 'gestao' ? 'on' : ''}" id="tGes" title="Mesa para gestores, que não seguem a escala">${A.icon('plus')} Mesa de gestão</button><button class="btn ${st.ferramenta === 'ronda' ? 'on' : ''}" id="tRon">${A.icon('plus')} Posição de ronda</button><button class="btn ${st.ferramenta === 'mesa' ? 'on' : ''}" id="tMesa">${A.icon('plus')} Mesa</button>` : ''}
       <button class="btn" id="undo" ${ult ? '' : 'disabled'} title="${ult ? 'Desfazer: ' + esc(ult.resumo) : 'Nada para desfazer'}">${A.icon('undo')} Desfazer</button>
       <button class="btn" id="reset" title="Volta a planta ao desenho original">Restaurar planta original</button>`;
     A.$$('#esc button', tb).forEach((b) => b.onclick = () => { st.escopo = b.dataset.e; A.render(); });
@@ -1898,7 +1910,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       await A.commit([...ov.keys()].map((cad) => ({ s: 'atribuicoes', op: 'delete', k: D.diaId(A.date, cad) })), { tipo: 'mapa', reversivel: true, resumo: `Removeu ajustes de ${U.fmtBR(A.date)}` }); A.toast('Ajustes do dia removidos.'); A.render();
     };
     A.$('#lay', tb).onchange = (e) => { st.layout = e.target.checked; st.ferramenta = null; A.render(); };
-    const tools = { tCad: 'cadeira', tRon: 'ronda', tMesa: 'mesa' };
+    const tools = { tCad: 'cadeira', tRon: 'ronda', tGes: 'gestao', tMesa: 'mesa' };
     for (const [id, f] of Object.entries(tools)) { const b = A.$('#' + id, tb); if (b) b.onclick = () => { st.ferramenta = st.ferramenta === f ? null : f; drawToolbar(ctx); drawSvg(ctx); }; }
     A.$('#undo', tb).onclick = async () => {
       try { const h = await A.undo(); if (h) { A.toast('Alteração desfeita: ' + h.resumo); A.render(); } } catch (e) { A.toast('Não foi possível desfazer.', 'err'); }
@@ -1974,14 +1986,17 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       if (s.e === 'ocupada') { fill = '#007A4C'; stroke = '#007A4C'; back = '#005A39'; idc = '#fff'; }
       else if (s.e === 'fora') { fill = '#fff'; stroke = '#87C3A9'; back = '#D1E8DF'; idc = '#005A39'; dash = 'stroke-dasharray="4 3"'; }
       else if (s.e === 'indisp') { fill = 'url(#hg)'; stroke = '#B6B6B6'; back = '#D9D9D8'; idc = '#696868'; }
+      else if (s.e === 'gestao') { fill = '#2F5D8A'; stroke = '#2F5D8A'; back = '#1F4468'; idc = '#fff'; }
+      else if (s.e === 'gestaoLivre') { fill = '#fff'; stroke = '#2F5D8A'; back = '#D6E3F0'; idc = '#1F4468'; }
       const nome = s.col ? D.apelido(s.col, A.data.colaboradores) : '';
-      const nmFill = s.e === 'ocupada' ? '#007A4C' : '#696868';
-      const desc = `${cad.rotulo} · ${cad.zona}${cad.tipo === 'ronda' ? ' · posição de ronda' : ''}${s.e === 'indisp' ? ' · indisponível' : s.e === 'livre' ? ' · livre' : s.e === 'ocupada' ? ' · ocupada por ' + s.col.nome : ' · titular ' + s.col.nome + ' (fora do escritório)'}${cad.obs ? ' · ' + cad.obs : ''}`;
+      const nmFill = s.e === 'ocupada' ? '#007A4C' : s.e === 'gestao' ? '#1F4468' : '#696868';
+      const desc = `${cad.rotulo} · ${cad.zona}${cad.tipo === 'ronda' ? ' · posição de ronda' : cad.tipo === 'gestao' ? ' · mesa de gestão' : ''}${s.e === 'indisp' ? ' · indisponível' : s.e === 'livre' || s.e === 'gestaoLivre' ? ' · livre' : s.e === 'gestao' ? ' · gestão: ' + s.col.nome : s.e === 'ocupada' ? ' · ocupada por ' + s.col.nome : ' · titular ' + s.col.nome + ' (fora do escritório)'}${cad.obs ? ' · ' + cad.obs : ''}`;
       g += `<g class="chair ${sel ? 'sel' : ''}" data-cad="${cad.id}" transform="translate(${cad.x},${cad.y})"><title>${esc(desc)}</title>
         <circle class="halo" r="${34 * sc}" fill="rgba(132,194,37,.15)" stroke="#EAA921" stroke-width="4" stroke-dasharray="7 4"/>
         <g transform="rotate(${cad.rot || 0}) scale(${sc})"><rect x="-15" y="-19" width="30" height="8" rx="4" fill="${back}" stroke="${stroke}" stroke-width="2.4"/><rect class="seat" x="-14" y="-9" width="28" height="26" rx="9" fill="${fill}" stroke="${stroke}" stroke-width="2.8" ${dash}/></g>
         <text y="${5}" text-anchor="middle" font-size="${10.5 * sc}" font-weight="700" fill="${idc}" style="pointer-events:none;font-family:var(--fonte)">${esc(cad.rotulo)}</text>
         ${cad.tipo === 'ronda' ? `<g transform="translate(${17 * sc},${-17 * sc})"><circle r="9" fill="#EAA921" stroke="#fff" stroke-width="1.5"/><text y="4" text-anchor="middle" font-size="11" font-weight="800" fill="#1C2325" style="pointer-events:none">R</text></g>` : ''}
+        ${cad.tipo === 'gestao' ? `<g transform="translate(${17 * sc},${-17 * sc})"><circle r="9" fill="#2F5D8A" stroke="#fff" stroke-width="1.5"/><text y="4" text-anchor="middle" font-size="11" font-weight="800" fill="#fff" style="pointer-events:none">G</text></g>` : ''}
         ${s.e === 'fora' ? `<g transform="translate(${-17 * sc},${-17 * sc})"><rect x="-13" y="-8" width="26" height="15" rx="7" fill="#87C3A9"/><text y="3.5" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fff" style="pointer-events:none">${esc(s.badge)}</text></g>` : ''}
         ${nome ? `<text class="nm" y="${acima.has(cad.id) ? -(30 * sc + 6) - (offs.get(cad.id) || 0) : 30 * sc + 14 + (offs.get(cad.id) || 0)}" text-anchor="middle" font-size="25" fill="${nmFill}" ${s.e === 'fora' ? 'font-style="italic"' : ''}>${esc(nome)}</text>` : ''}</g>`;
     }
@@ -1995,25 +2010,27 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     const st = A.ui.planta; const side = A.$('#sidep', ctx.c);
     const S = A.S(true); const ind = D.indicadoresDia(A.date, S);
     const eff = st.escopo === 'padrao' ? A.atribIdx.padrao : ind.eff;
-    const ativos = A.ativos(true);
+    const ativos = A.ativos(true); const gestao = A.gestaoPlanta(true);
     const classeDe = (c) => { const i = ind.porColab.get(c.id); return i ? i.classe : null; };
     const presentes = ativos.filter((c) => classeDe(c) === 'presencial'); const semCad = ind.semPosicao;
     const homes = ativos.filter((c) => classeDe(c) === 'home'); const outros = ativos.filter((c) => !['presencial', 'home'].includes(classeDe(c)));
     const person = (c, extra) => `<div class="person ${st.pessoa === c.id ? 'on' : ''} ${extra || ''}" data-p="${c.id}"><span>${esc(c.nome)}</span>${A.pillSigla((ind.porColab.get(c.id) || {}).sigla, classeDe(c))}</div>`;
     const chairOf = new Map(); for (const [cad, col] of eff) chairOf.set(col, cad);
+    const personG = (c) => { const onde = chairOf.get(c.id); const cd = onde && A.cadeira(onde); return `<div class="person ${st.pessoa === c.id ? 'on' : ''}" data-p="${c.id}"><span>${esc(c.nome)}${c.cargo ? ` <span class="small muted">· ${esc(c.cargo)}</span>` : ''}</span><span class="pill gest">${cd ? esc(cd.rotulo) : 'sem mesa'}</span></div>`; };
+    const mesasG = A.data.cadeiras.filter((x) => x.tipo === 'gestao'); const mesasGOc = mesasG.filter((x) => { const k = eff.get(x.id); const cc = k && A.colab(k); return cc && cc.situacao !== 'inativo'; }).length;
     let insp = '';
     if (st.sel && st.sel.tipo === 'cad') {
       const cad = A.cadeira(st.sel.id);
       if (cad) {
-        const colId = eff.get(cad.id) || ''; const s = estadoCadeira(cad, eff, ind);
+        const colId = eff.get(cad.id) || ''; const s = estadoCadeira(cad, eff, ind); const lista = cad.tipo === 'gestao' ? gestao : ativos;
         const rot = (ind.porColab.get(colId) || {});
         insp = `<div class="card" id="insp"><h2>Cadeira ${esc(cad.rotulo)}</h2>
-          <div class="small muted" style="margin-bottom:8px">${esc(cad.zona)} · ${s.e === 'ocupada' ? 'ocupada' : s.e === 'indisp' ? 'indisponível' : s.e === 'fora' ? 'titular fora do escritório neste dia' : 'livre'}<br>Editando: <b>${st.escopo === 'padrao' ? 'disposição padrão' : 'ajuste de ' + U.fmtBR(A.date)}</b></div>
-          <label class="f">Colaborador<select id="iCol" ${cad.tipo === 'indisponivel' ? 'disabled' : ''}><option value="">— livre —</option>${ativos.map((c) => { const i = ind.porColab.get(c.id) || {}; const onde = chairOf.get(c.id); return `<option value="${c.id}" ${colId === c.id ? 'selected' : ''}>${esc(c.nome)} — ${i.sigla ? esc(D.rotuloSigla(i.sigla, A.siglasMap, A.privado).texto) : 'sem escala'}${onde && onde !== cad.id ? ' (em ' + esc((A.cadeira(onde) || {}).rotulo || '?') + ')' : ''}</option>`; }).join('')}</select></label>
-          ${colId && rot.classe && rot.classe !== 'presencial' ? `<div class="alert warn" style="margin-top:8px">${A.icon('info')}<div>Neste dia o titular está como <b>${esc(A.classeRotulo(rot.classe))}</b>; a cadeira aparece como livre.</div></div>` : ''}
+          <div class="small muted" style="margin-bottom:8px">${esc(cad.zona)} · ${cad.tipo === 'gestao' ? 'mesa de gestão · ' : ''}${s.e === 'ocupada' || s.e === 'gestao' ? 'ocupada' : s.e === 'indisp' ? 'indisponível' : s.e === 'fora' ? 'titular fora do escritório neste dia' : 'livre'}<br>Editando: <b>${st.escopo === 'padrao' ? 'disposição padrão' : 'ajuste de ' + U.fmtBR(A.date)}</b></div>
+          <label class="f">Colaborador<select id="iCol" ${cad.tipo === 'indisponivel' ? 'disabled' : ''}><option value="">— livre —</option>${lista.map((c) => { const i = ind.porColab.get(c.id) || {}; const onde = chairOf.get(c.id); return `<option value="${c.id}" ${colId === c.id ? 'selected' : ''}>${esc(c.nome)} — ${cad.tipo === 'gestao' ? 'gestão' : i.sigla ? esc(D.rotuloSigla(i.sigla, A.siglasMap, A.privado).texto) : 'sem escala'}${onde && onde !== cad.id ? ' (em ' + esc((A.cadeira(onde) || {}).rotulo || '?') + ')' : ''}</option>`; }).join('')}</select></label>
+          ${colId && cad.tipo !== 'gestao' && rot.classe && rot.classe !== 'presencial' ? `<div class="alert warn" style="margin-top:8px">${A.icon('info')}<div>Neste dia o titular está como <b>${esc(A.classeRotulo(rot.classe))}</b>; a cadeira aparece como livre.</div></div>` : ''}
           <div style="display:flex;gap:6px;margin:8px 0;flex-wrap:wrap"><button class="btn sm" id="iLivre">Liberar</button><button class="btn sm" id="iDup">${A.icon('copy')} Duplicar</button><button class="btn sm perigo" id="iDel">${A.icon('trash')} Excluir</button></div>
           <div class="form" style="gap:8px"><label class="f">Identificação<input type="text" id="iRot" value="${esc(cad.rotulo)}"></label>
-          <label class="f">Tipo<select id="iTipo"><option value="normal" ${cad.tipo === 'normal' ? 'selected' : ''}>Posição de trabalho</option><option value="ronda" ${cad.tipo === 'ronda' ? 'selected' : ''}>Posição de ronda</option><option value="indisponivel" ${cad.tipo === 'indisponivel' ? 'selected' : ''}>Indisponível</option></select></label>
+          <label class="f">Tipo<select id="iTipo"><option value="normal" ${cad.tipo === 'normal' ? 'selected' : ''}>Posição de trabalho</option><option value="ronda" ${cad.tipo === 'ronda' ? 'selected' : ''}>Posição de ronda</option><option value="gestao" ${cad.tipo === 'gestao' ? 'selected' : ''}>Mesa de gestão (não segue a escala)</option><option value="indisponivel" ${cad.tipo === 'indisponivel' ? 'selected' : ''}>Indisponível</option></select></label>
           <label class="f full">Zona / área<input type="text" id="iZona" value="${esc(cad.zona)}"></label>
           <label class="f full">Observações<textarea id="iObs" rows="2">${esc(cad.obs || '')}</textarea></label>
           <label class="f">Tamanho<input type="range" id="iTam" min="0.6" max="2" step="0.1" value="${cad.escala || 1}"></label>
@@ -2033,7 +2050,10 @@ https://github.com/nodeca/pako/blob/main/LICENSE
           <span><svg viewBox="-20 -22 40 42"><rect x="-15" y="-19" width="30" height="8" rx="4" fill="#FDEDC8" stroke="#A87000" stroke-width="2.4"/><rect x="-14" y="-9" width="28" height="26" rx="9" fill="#fff" stroke="#A87000" stroke-width="2.8"/></svg>Livre</span>
           <span><svg viewBox="-20 -22 40 42"><rect x="-15" y="-19" width="30" height="8" rx="4" fill="#D1E8DF" stroke="#87C3A9" stroke-width="2.4"/><rect x="-14" y="-9" width="28" height="26" rx="9" fill="#fff" stroke="#87C3A9" stroke-width="2.8" stroke-dasharray="4 3"/></svg>Titular fora</span>
           <span><svg viewBox="-20 -22 40 42"><rect x="-15" y="-19" width="30" height="8" rx="4" fill="#D9D9D8" stroke="#B6B6B6" stroke-width="2.4"/><rect x="-14" y="-9" width="28" height="26" rx="9" fill="#EEE" stroke="#B6B6B6" stroke-width="2.8"/></svg>Indisponível</span>
-          <span><svg viewBox="-20 -22 40 42"><rect x="-14" y="-9" width="28" height="26" rx="9" fill="#fff" stroke="#A87000" stroke-width="2.8"/><circle cx="14" cy="-12" r="9" fill="#EAA921"/><text x="14" y="-8" text-anchor="middle" font-size="11" font-weight="800">R</text></svg>Ronda</span></div>
+          <span><svg viewBox="-20 -22 40 42"><rect x="-14" y="-9" width="28" height="26" rx="9" fill="#fff" stroke="#A87000" stroke-width="2.8"/><circle cx="14" cy="-12" r="9" fill="#EAA921"/><text x="14" y="-8" text-anchor="middle" font-size="11" font-weight="800">R</text></svg>Ronda</span>
+          <span><svg viewBox="-20 -22 40 42"><rect x="-15" y="-19" width="30" height="8" rx="4" fill="#1F4468" stroke="#2F5D8A" stroke-width="2.4"/><rect x="-14" y="-9" width="28" height="26" rx="9" fill="#2F5D8A" stroke="#2F5D8A" stroke-width="2.8"/></svg>Gestão</span>
+          <span><svg viewBox="-20 -22 40 42"><rect x="-15" y="-19" width="30" height="8" rx="4" fill="#D6E3F0" stroke="#2F5D8A" stroke-width="2.4"/><rect x="-14" y="-9" width="28" height="26" rx="9" fill="#fff" stroke="#2F5D8A" stroke-width="2.8"/></svg>Gestão livre</span></div>
+        ${gestao.length || mesasG.length ? `<h3>Gestores (${gestao.length})${mesasG.length ? ` · mesas ${mesasGOc}/${mesasG.length}` : ''}</h3><div class="small muted" style="margin-bottom:4px">Não seguem a escala. Clique no nome e depois em uma mesa de gestão.${mesasG.length ? '' : ' Ainda não há mesa de gestão: em "Editar layout", use <b>+ Mesa de gestão</b> ou mude o tipo de uma cadeira.'}</div>${gestao.map(personG).join('') || '<div class="small muted">Nenhum gestor cadastrado.</div>'}<div style="height:10px"></div>` : ''}
         ${semCad.length ? `<h3>Presenciais sem cadeira (${semCad.length})</h3><div class="small muted" style="margin-bottom:4px">Clique no nome e depois na cadeira.</div>${semCad.map((c) => person(c, 'warn')).join('')}` : (ind.temEscala ? '<div class="alert ok" style="margin:0">' + A.icon('check') + '<div>Todos os presenciais têm cadeira.</div></div>' : '')}
         ${homes.length ? `<h3 style="margin-top:10px">Home office (${homes.length})</h3>${homes.map((c) => person(c)).join('')}` : ''}
         ${outros.length ? `<h3 style="margin-top:10px">Ausentes / a confirmar / sem escala (${outros.length})</h3>${outros.map((c) => person(c)).join('')}` : ''}
@@ -2086,12 +2106,13 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   async function atribuir(ctx, cadId, colId) {
     const st = A.ui.planta; const cad = A.cadeira(cadId);
     if (cad.tipo === 'indisponivel' && colId) { A.toast('Esta posição está indisponível.', 'warn'); return; }
+    if (colId && !A.podeSentar(cad, A.colab(colId))) { A.toast(cad.tipo === 'gestao' ? 'Mesa de gestão é só para gestores.' : 'Gestores (fora da escala) sentam nas mesas de gestão.', 'warn'); return; }
     const ops = D.atribuir(A.atribIdx, st.escopo, A.date, cadId, colId, A.data.cadeiras.map((x) => x.id));
     if (!ops.length) return;
     const col = colId && A.colab(colId);
     await mut(ops, colId ? `Atribuiu ${col.nome} à cadeira ${cad.rotulo}${st.escopo === 'dia' ? ' em ' + U.fmtBRshort(A.date) : ''}` : `Liberou a cadeira ${cad.rotulo}`);
     st.pessoa = null; A.setSaved(true);
-    if (col) { const i = D.indicadoresDia(A.date, A.S(true)).porColab.get(colId); if (i && i.classe && i.classe !== 'presencial') A.toast(`${col.nome} está como ${A.classeRotulo(i.classe)} neste dia: a cadeira aparecerá como livre.`, 'warn'); }
+    if (col && cad.tipo !== 'gestao') { const i = D.indicadoresDia(A.date, A.S(true)).porColab.get(colId); if (i && i.classe && i.classe !== 'presencial') A.toast(`${col.nome} está como ${A.classeRotulo(i.classe)} neste dia: a cadeira aparecerá como livre.`, 'warn'); }
     drawToolbar(ctx); drawSvg(ctx); drawSide(ctx);
   }
 
@@ -2145,6 +2166,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
           if (dest && dest.dataset.cad !== d.cad.id) {
             const other = A.cadeira(dest.dataset.cad);
             if (other.tipo === 'indisponivel' || d.cad.tipo === 'indisponivel') { A.toast('Uma das posições está indisponível.', 'warn'); return; }
+            const effNow = st.escopo === 'padrao' ? A.atribIdx.padrao : D.efetivas(A.atribIdx, A.date); const eA = A.colab(effNow.get(d.cad.id)); const eB = A.colab(effNow.get(other.id));
+            if (!A.podeSentar(other, eA) || !A.podeSentar(d.cad, eB)) { A.toast('Mesas de gestão só trocam entre gestores.', 'warn'); return; }
             const ops = D.trocar(A.atribIdx, st.escopo, A.date, d.cad.id, other.id, A.data.cadeiras.map((x) => x.id));
             if (ops.length) { await mut(ops, `Trocou os ocupantes de ${d.cad.rotulo} e ${other.rotulo}`); A.toast('Posições trocadas.'); }
             refresh();
@@ -2169,10 +2192,10 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       const n = { id: 'el-' + U.uid('n').slice(2), kind: 'mesa', x: snap(p.x - 45), y: snap(p.y - 22), w: 90, h: 45, rotulo: '' };
       await mut([{ s: 'elementos', op: 'put', v: n }], 'Adicionou mesa'); st.sel = { tipo: 'el', id: n.id };
     } else {
-      const ronda = f === 'ronda'; const pref = ronda ? 'RD' : 'N';
+      const ronda = f === 'ronda'; const ges = f === 'gestao'; const pref = ronda ? 'RD' : ges ? 'G' : 'N';
       let i = 1, rot; do { rot = pref + U.pad(i++); } while (A.data.cadeiras.some((x) => x.rotulo === rot));
-      const n = { id: 'cad-' + U.uid('n').slice(2), rotulo: rot, zona: ronda ? 'Ronda' : 'Novas posições', x: snap(p.x), y: snap(p.y), rot: 0, escala: 1, tipo: ronda ? 'ronda' : 'normal', obs: '', ordem: A.data.cadeiras.length };
-      await mut([{ s: 'cadeiras', op: 'put', v: n }], `Adicionou a ${ronda ? 'posição de ronda' : 'cadeira'} ${rot}`); st.sel = { tipo: 'cad', id: n.id };
+      const n = { id: 'cad-' + U.uid('n').slice(2), rotulo: rot, zona: ronda ? 'Ronda' : ges ? 'Gestão' : 'Novas posições', x: snap(p.x), y: snap(p.y), rot: 0, escala: 1, tipo: ronda ? 'ronda' : ges ? 'gestao' : 'normal', obs: '', ordem: A.data.cadeiras.length };
+      await mut([{ s: 'cadeiras', op: 'put', v: n }], `Adicionou ${ronda ? 'a posição de ronda' : ges ? 'a mesa de gestão' : 'a cadeira'} ${rot}`); st.sel = { tipo: 'cad', id: n.id };
     }
     st.ferramenta = null; drawToolbar(ctx); drawSvg(ctx); drawSide(ctx);
   }
@@ -3015,7 +3038,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     <h3>1. Perfis de acesso</h3><p><b>Consulta</b>: enxerga <b>apenas os próprios dados</b> (o restante fica privado) e, só em nome próprio, monta a <b>própria escala</b>, <b>inclui eventos</b> (altera só os que ela mesma registrou) e <b>programa férias e gera MOP</b>; nos formulários de evento e de MOP aparece somente o próprio perfil. Quem tem o cargo <b>Analista III</b> (e setor definido no cadastro) também enxerga e altera a <b>escala do próprio setor</b>, e só dela. <b>Edição</b>: acesso livre — monta a escala de todos, mexe na planta, cadastra colaboradores e gerencia todos os eventos. <b>Administrador</b>: tudo isso, mais usuários, siglas, backup e restauração. O perfil é definido pelo administrador, independente do cargo; para gerentes terem acesso livre, o perfil deles deve ser Edição ou Administrador. No <b>primeiro acesso</b> a pessoa informa identificação e cargo (nome, cargo, matrícula, CPF, admissão, aniversário) e contato (e-mail, telefone); o restante do cadastro (gestão, setor, centro de custo etc.) é preenchido por um gestor. Entra direto se já estiver no cadastro ou num acesso criado antes; se algum dado for novo, um <b>gestor</b> aprova em Configurações &gt; Solicitações de acesso. Cada pessoa entra com seu próprio usuário e senha.</p>
     <h3>2. Montar a escala</h3><p>Em <b>Escala</b>, clique em <b>Editar escala</b>, escolha o pincel (uma sigla) e clique ou arraste sobre as células. Clique no número do dia para aplicar a todos. <b>Gerar por rodízio</b> distribui os dias presenciais automaticamente conforme as regras de cada colaborador. <b>Repetir semana</b> copia uma semana para as próximas. Tudo pode ser desfeito com <b>Desfazer</b>.</p>
     <h3>3. Siglas</h3><p>Em <b>Configurações &gt; Siglas</b> você pode criar, renomear, recolorir, trocar a classificação ou excluir qualquer sigla. Ao renomear, a escala já lançada acompanha o novo nome. Ao excluir uma sigla em uso, você escolhe por qual outra substituir (ou apaga os lançamentos).</p>
-    <h3>4. Planta</h3><p><b>Disposição padrão</b> vale para todos os dias (a planta se repete automaticamente). <b>Ajuste do dia</b> vale só para a data. Clique numa cadeira para atribuir; arraste uma cadeira ocupada sobre outra para trocar. Quem está em home office ou ausente nunca ocupa a cadeira no dia.</p>
+    <h3>4. Planta</h3><p><b>Disposição padrão</b> vale para todos os dias (a planta se repete automaticamente). <b>Ajuste do dia</b> vale só para a data. Clique numa cadeira para atribuir; arraste uma cadeira ocupada sobre outra para trocar. Quem está em home office ou ausente nunca ocupa a cadeira no dia. <b>Gestores</b> não seguem a escala: aparecem na lista “Gestores” ao lado e sentam em <b>mesas de gestão</b> (azuis, criadas em “Editar layout” › “+ Mesa de gestão”, ou mudando o tipo de uma cadeira). Essas mesas não entram na capacidade nem na ocupação do rodízio.</p>
     <h3>5. Cadastro, cargos, gestores e filtros</h3><p>Cada cadastro tem <b>cargo</b>, matrícula, CPF, e-mail (obrigatório), telefone, gestão e setor. O <b>cargo</b> define o tipo de cadastro: cargos marcados como <b>gestão</b> (botão <b>Cargos</b>; Supervisor, Gerente e Gerente Geral) são os gestores, aparecem na lista de Gestão dos demais, recebem as MOPs e precisam do <b>Código do gestor</b>. O filtro <b>Gestão</b> do topo lista só os <b>gerentes</b> e mostra também as equipes dos supervisores que respondem a eles; a hierarquia é <b>Gerente Geral</b> (cargo máximo, não responde a ninguém) → <b>Gerente</b> (responde ao Gerente Geral, opcional) → <b>Supervisor</b> (responde a um gerente, obrigatório). O <b>e-mail</b> é o que liga o cadastro aos envios: a MOP vai para o gestor e os avisos de alteração vão para o colaborador, sem digitar endereço. Use os filtros <b>Gestão</b> e <b>Setor</b> no topo para ver só uma equipe. A planilha de cadastro pode ser baixada, preenchida e importada.</p><h3>6. Férias e MOP</h3><p>Em <b>Férias</b>, programe o período, marque as programações e clique em <b>Gerar MOP</b>: sai a planilha FRC-016 igual ao modelo (uma por gestor), com pré-visualização, impressão e e-mail pronto para o gestor.</p><h3>7. Avisos</h3><p>O sino no topo mostra aniversários e eventos dos próximos dias (a antecedência é ajustável em Preferências). A Visão geral também lista os próximos.</p>
     <h3>8. Backup</h3><p>${E.ONLINE ? 'Os dados ficam no banco online (Supabase). O administrador deve baixar um backup de vez em quando em <b>Backup e dados</b>; antes de restaurar ou apagar tudo, o banco guarda uma cópia de segurança sozinho.' : 'O servidor guarda uma cópia diária automática (últimos 30 dias, na pasta <code>data/backups</code>). O administrador também pode baixar e restaurar um backup em <b>Backup e dados</b>.'}</p></div>`;
 
