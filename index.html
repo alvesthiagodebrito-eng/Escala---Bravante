@@ -1481,7 +1481,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     A.rev = r.rev; A.user = r.usuario; A.pendAcessos = (r.pendencias && r.pendencias.acessos) || 0; A.escopo = r.escopo || { tipo: 'tudo' };
     for (const n of NOMES) A.data[n] = r.stores[n] || [];
     // cadastros de apoio (gestor direto do usuário, necessário para a MOP) ficam fora das listas
-    const todos = A.data.colaboradores; A.data.apoio = todos.filter((c) => c.apoio); A.data.colaboradores = todos.filter((c) => !c.apoio);
+    const todos = A.data.colaboradores; A.data.apoio = todos.filter((c) => c.apoio); A.data.colaboradores = todos.filter((c) => !c.apoio); A.data.dir = A.data.apoio.filter((c) => c.dir); // dir: diretório (nome/cargo/setor de todos) para planta e eventos
     A.rebuild();
   };
   A.rebuild = () => {
@@ -1494,6 +1494,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     d.gestores = C.gestoresDe(comApoio, A.cargosLista); A._porId = new Map(comApoio.map((c) => [c.id, c])); // gestor = cadastro com cargo de gestão
     A.siglas = A.cfg('siglas', E.SIGLAS_PADRAO);
     A.siglasMap = D.siglasMap(A.siglas);
+    if (!A.siglasMap.AUS) A.siglasMap.AUS = { sigla: 'AUS', descricao: 'Ausente', classe: 'ausente', sensivel: true }; // a escala dos outros chega assim quando a sigla é sensível
     A.escalaIdx = D.indexEscala(d.escala);
     A.atribIdx = D.indexAtribs(d.atribuicoes);
     A.privado = A.cfg('privacidade', true);
@@ -1527,12 +1528,14 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   A.gestorNome = (id) => { const g = A.gestor(id); return g ? g.nome : ''; };
   A.setores = () => { const m = new Map(); for (const c of (A.data.colaboradores || [])) if (c.setor && c.setor.trim()) m.set(U.normName(c.setor), c.setor.trim()); return [...m.values()].sort((a, b) => a.localeCompare(b, 'pt-BR')); };
   /** Estado para os cálculos do domínio. `todos` ignora os filtros (planta e rodízio sempre usam a equipe toda). */
-  A.S = (todos) => ({ colabs: (todos ? A.data.colaboradores : A.visiveis()).filter((c) => !A.foraEscala(c)), escalaIdx: A.escalaIdx, siglas: A.siglasMap, cadeiras: A.data.cadeiras, atribIdx: A.atribIdx });
-  A.colab = (id) => A.data.colaboradores.find((c) => c.id === id);
+  A.S = (todos) => ({ colabs: (todos ? A.pessoas() : A.visiveis()).filter((c) => !A.foraEscala(c)), escalaIdx: A.escalaIdx, siglas: A.siglasMap, cadeiras: A.data.cadeiras, atribIdx: A.atribIdx });
+  A.colab = (id) => A.data.colaboradores.find((c) => c.id === id) || (A.data.dir || []).find((c) => c.id === id);
+  /** Todos os nomes que o usuário pode ver (cadastro do escopo + diretório de nome/cargo dos demais). */
+  A.pessoas = () => A.data.colaboradores.concat(A.data.dir || []);
   A.cadeira = (id) => A.data.cadeiras.find((c) => c.id === id);
-  A.ativos = (todos) => (todos ? A.data.colaboradores : A.visiveis()).filter((c) => c.situacao !== 'inativo' && !A.foraEscala(c));
+  A.ativos = (todos) => (todos ? A.pessoas() : A.visiveis()).filter((c) => c.situacao !== 'inativo' && !A.foraEscala(c));
   /** Pessoas de gestão: não seguem a escala (regra "Fora da escala") ou têm cargo de gestão. Sentam em mesas de gestão. */
-  A.gestaoPlanta = (todos) => (todos ? A.data.colaboradores : A.visiveis()).filter((c) => c.situacao !== 'inativo' && (A.foraEscala(c) || A.ehGestor(c)));
+  A.gestaoPlanta = (todos) => (todos ? A.pessoas() : A.visiveis()).filter((c) => c.situacao !== 'inativo' && (A.foraEscala(c) || A.ehGestor(c)));
   /** Regras de ocupação: mesa de gestão só para gestão; quem está fora da escala só senta em mesa de gestão. */
   A.podeSentar = (cad, c) => {
     if (!c) return true;
@@ -2208,7 +2211,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       else if (s.e === 'indisp') { fill = 'url(#hg)'; stroke = '#B6B6B6'; back = '#D9D9D8'; idc = '#696868'; }
       else if (s.e === 'gestao') { fill = '#2F5D8A'; stroke = '#2F5D8A'; back = '#1F4468'; idc = '#fff'; }
       else if (s.e === 'gestaoLivre') { fill = '#fff'; stroke = '#2F5D8A'; back = '#D6E3F0'; idc = '#1F4468'; }
-      const nome = s.col ? D.apelido(s.col, A.data.colaboradores) : '';
+      const nome = s.col ? D.apelido(s.col, A.pessoas()) : '';
       const nmFill = s.e === 'ocupada' ? '#007A4C' : s.e === 'gestao' ? '#1F4468' : '#696868';
       const desc = `${cad.rotulo} · ${cad.zona}${cad.tipo === 'ronda' ? ' · posição de ronda' : cad.tipo === 'gestao' ? ' · mesa de gestão' : ''}${s.e === 'indisp' ? ' · indisponível' : s.e === 'livre' || s.e === 'gestaoLivre' ? ' · livre' : s.e === 'gestao' ? ' · gestão: ' + s.col.nome : s.e === 'ocupada' ? ' · ocupada por ' + s.col.nome : ' · titular ' + s.col.nome + ' (fora do escritório)'}${cad.obs ? ' · ' + cad.obs : ''}`;
       g += `<g class="chair ${sel ? 'sel' : ''}" data-cad="${cad.id}" transform="translate(${cad.x},${cad.y})"><title>${esc(desc)}</title>
@@ -2945,32 +2948,66 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       <label class="f">Abono pecuniário (vender 10 dias)<select id="vAb"><option ${v.abono !== 'Sim' ? 'selected' : ''}>Não</option><option ${v.abono === 'Sim' ? 'selected' : ''}>Sim</option></select></label>
       <label class="f">Adiantamento do 13º<select id="v13"><option ${v.adiant13 !== 'Sim' ? 'selected' : ''}>Não</option><option ${v.adiant13 === 'Sim' ? 'selected' : ''}>Sim</option></select></label>
       ${siglaFerias() && A.podeEscalaAlgo() ? `<label class="f full chk"><input type="checkbox" id="vEsc" ${v.lancaEscala ? 'checked' : ''}> Lançar “${esc(siglaFerias())}” na escala nos dias úteis do período</label>` : ''}
+      <div class="full" id="vDiv"></div>
       <label class="f full">Observações<textarea id="vObs" rows="2">${esc(v.obs || '')}</textarea></label>
       <div id="vAv" class="full"></div></div>`,
     onMount: (mm) => {
-      const g = (id) => A.$('#' + id, mm.el); const calc = () => {
+      const g = (id) => A.$('#' + id, mm.el); const extras = []; mm.extras = extras;
+      /** Outras programações (ainda sem MOP) da mesma pessoa contam no limite de 30 dias e 3 períodos. */
+      const outrasDe = (colabId) => A.data.ferias.filter((x) => x.colabId === colabId && x.status === 'programada' && (!f || x.id !== f.id));
+      const ordinal = (n) => ['segunda', 'terceira'][n - 1];
+      const todasLinhas = () => { const colabId = g('vCol').value; return [{ inicio: g('vIni').value, dias: g('vDias').value }, ...extras.map((x) => ({ inicio: x.inicio, dias: x.dias })), ...outrasDe(colabId).map((x) => ({ inicio: x.inicio, dias: x.dias }))]; };
+      const desenhaDiv = () => {
+        const colabId = g('vCol').value; const outras = outrasDe(colabId); const nPeriodos = 1 + extras.length + outras.length; const v = C.validaPeriodos(todasLinhas());
+        g('vDiv').innerHTML = `<div class="sec">Divisão das férias <span class="muted small">— até ${C.FERIAS_PERIODOS} períodos, ${C.FERIAS_DIAS} dias no total</span></div>
+          ${outras.length ? `<div class="small muted" style="margin:4px 0">Já programado para esta pessoa: ${outras.map((x) => `${U.fmtBR(x.inicio)} a ${U.fmtBR(x.fim)} (${x.dias} dias)`).join('; ')}.</div>` : ''}
+          ${extras.map((x, i) => `<div class="form" style="margin:6px 0;padding:8px;border:1px dashed var(--line,#cfd8d3);border-radius:8px"><b class="small full">${i + 2}ª programação${outras.length ? '' : ''}</b>
+            <label class="f">Início *<input type="date" data-x="${i}" data-k="inicio" value="${esc(x.inicio)}"></label>
+            <label class="f">Dias *<input type="number" data-x="${i}" data-k="dias" min="1" max="${C.FERIAS_DIAS}" value="${esc(x.dias)}"></label>
+            <div class="small full"><span data-xfim="${i}"></span> <button type="button" class="btn sm perigo" data-xrm="${i}">Remover</button></div></div>`).join('')}
+          <div class="toolbar" style="margin-top:6px">${nPeriodos < C.FERIAS_PERIODOS ? `<button type="button" class="btn sm" id="vAdd">${A.icon('plus')} Adicionar ${ordinal(nPeriodos)} programação</button>` : '<span class="small muted">Máximo de períodos atingido.</span>'}<span class="sp"></span><b class="small">Total: ${v.total} de ${C.FERIAS_DIAS} dias${v.restam ? ` · restam ${v.restam}` : ''}</b></div>`;
+        A.$$('[data-x]', mm.el).forEach((inp) => { const h = () => { extras[+inp.dataset.x][inp.dataset.k] = inp.value; calc(true); }; inp.oninput = h; inp.onchange = h; });
+        A.$$('[data-xrm]', mm.el).forEach((b) => b.onclick = () => { extras.splice(+b.dataset.xrm, 1); calc(); });
+        const add = g('vAdd'); if (add) add.onclick = () => {
+          const colabId2 = g('vCol').value; const resto = C.FERIAS_DIAS - todasLinhas().reduce((n, l) => n + (Number.isInteger(Number(l.dias)) ? Number(l.dias) : 0), 0);
+          if (resto <= 0 && !extras.length && !outrasDe(colabId2).length && Number(g('vDias').value) >= C.FERIAS_DIAS) { g('vDias').value = 15; extras.push({ inicio: '', dias: 15 }); } else extras.push({ inicio: '', dias: Math.max(resto, 0) || '' });
+          calc();
+        };
+      };
+      const calc = (soTexto) => {
         const ini = g('vIni').value; const dias = Number(g('vDias').value); const fim = C.fimFerias(ini, dias);
         g('vFim').value = fim ? U.fmtBR(fim) : ''; g('vRet').value = fim ? `${U.WEEKDAY_LABEL[U.weekday(U.addDays(fim, 1))]}, ${U.fmtBR(U.addDays(fim, 1))}` : '';
-        const av = C.avisosFerias({ id: f && f.id, colabId: g('vCol').value, inicio: ini, dias }, A.colab(g('vCol').value), A.data.ferias, hoje);
-        const col = A.colab(g('vCol').value); const fa = col ? C.faltando(col, A.cargos()) : [];
-        g('vAv').innerHTML = (fa.length ? `<div class="alert warn">${A.icon('warn')}<div>Cadastro de ${esc(col.nome)} incompleto (falta: ${esc(fa.map((k) => C.ROTULOS[k]).join(', '))}). Dá para programar, mas a MOP só sai depois de completar.</div></div>` : '') + av.map((t) => `<div class="alert warn">${A.icon('warn')}<div>${esc(t)}</div></div>`).join('');
+        const colabId = g('vCol').value;
+        const outrasFerias = A.data.ferias.filter((x) => !(f && x.id === f.id));
+        const av = C.avisosFerias({ id: f && f.id, colabId, inicio: ini, dias }, A.colab(colabId), outrasFerias, hoje);
+        extras.forEach((x, i) => { const fx = C.fimFerias(x.inicio, Number(x.dias)); const el = A.$(`[data-xfim="${i}"]`, mm.el); if (el) el.textContent = fx ? `Último dia: ${U.fmtBR(fx)}` : ''; });
+        const vv = C.validaPeriodos(todasLinhas()); const col = A.colab(colabId); const fa = col ? C.faltando(col, A.cargos()) : [];
+        if (!soTexto) desenhaDiv(); else { const t = A.$('#vDiv b.small:last-child', mm.el); if (t) t.textContent = `Total: ${vv.total} de ${C.FERIAS_DIAS} dias${vv.restam ? ` · restam ${vv.restam}` : ''}`; }
+        g('vAv').innerHTML = (fa.length ? `<div class="alert warn">${A.icon('warn')}<div>Cadastro de ${esc(col.nome)} incompleto (falta: ${esc(fa.map((k) => C.ROTULOS[k]).join(', '))}). Dá para programar, mas a MOP só sai depois de completar.</div></div>` : '') + ((extras.length || outrasDe(colabId).length || vv.total > C.FERIAS_DIAS) ? vv.erros : []).map((t) => `<div class="alert err">${A.icon('warn')}<div>${esc(t)}</div></div>`).join('') + [...vv.avisos, ...av].map((t) => `<div class="alert warn">${A.icon('warn')}<div>${esc(t)}</div></div>`).join('');
       };
-      ['vCol', 'vIni', 'vDias'].forEach((id) => { g(id).oninput = calc; g(id).onchange = calc; }); calc();
+      ['vCol', 'vIni', 'vDias'].forEach((id) => { g(id).oninput = () => calc(id !== 'vCol' && id !== 'vDias' ? true : false); g(id).onchange = () => calc(); }); calc();
     },
     botoes: [{ label: 'Cancelar' }, { label: 'Salvar programação', cls: 'pri', onClick: async (mm) => {
-      const g = (id) => A.$('#' + id, mm.el); const colabId = g('vCol').value; const inicio = g('vIni').value; const dias = Number(g('vDias').value);
+      const g = (id) => A.$('#' + id, mm.el); const colabId = g('vCol').value; const inicio = g('vIni').value; const dias = Number(g('vDias').value); const extras = mm.extras || [];
       if (!colabId) { A.toast('Escolha o colaborador.', 'warn'); return false; }
       if (!inicio) { A.toast('Informe o início das férias.', 'warn'); return false; }
       if (!(dias >= 1 && dias <= 30) || !Number.isInteger(dias)) { A.toast('A quantidade de dias deve ser um número inteiro de 1 a 30.', 'warn'); return false; }
-      const reg = { ...(f || {}), id: f ? f.id : U.uid('fer'), colabId, inicio, dias, fim: C.fimFerias(inicio, dias), abono: g('vAb').value, adiant13: g('v13').value, obs: g('vObs').value.trim(), status: f ? f.status : 'programada', criadoEm: f ? f.criadoEm : new Date().toISOString(), criadoPor: f ? f.criadoPor : A.user.usuario };
-      const lanc = g('vEsc') ? g('vEsc').checked : false; const ops = [];
-      const sg = siglaFerias();
-      if (f && f.lancou && A.podeEscala(f.colabId)) for (const d of f.lancou) { const r = A.escalaIdx.get(d); if (r && r.get(f.colabId) === sg) ops.push({ s: 'escala', op: 'delete', k: chaveEsc(d, f.colabId) }); }
-      reg.lancou = A.podeEscala(colabId) ? [] : ((f && f.lancou) || []); // só mexe na escala de quem pode (o banco confere)
-      if (lanc && sg && A.podeEscala(colabId)) { reg.lancou = C.diasUteis(inicio, reg.fim); for (const d of reg.lancou) ops.push({ s: 'escala', op: 'put', v: { key: chaveEsc(d, colabId), date: d, colabId, sigla: sg, por: A.user.usuario, em: new Date().toISOString() } }); }
-      ops.push({ s: 'ferias', op: 'put', v: reg });
+      for (const [i, x] of extras.entries()) { if (!x.inicio || !(Number(x.dias) >= 1) || !Number.isInteger(Number(x.dias))) { A.toast(`Preencha o início e os dias da ${i + 2}ª programação (ou remova).`, 'warn'); return false; } }
+      const outras = A.data.ferias.filter((x) => x.colabId === colabId && x.status === 'programada' && (!f || x.id !== f.id));
+      const vv = C.validaPeriodos([{ inicio, dias }, ...extras.map((x) => ({ inicio: x.inicio, dias: x.dias })), ...outras.map((x) => ({ inicio: x.inicio, dias: x.dias }))]);
+      if (vv.erros.length) { A.toast(vv.erros[0], 'warn'); return false; }
+      const lanc = g('vEsc') ? g('vEsc').checked : false; const ops = []; const sg = siglaFerias(); const agora = new Date().toISOString();
+      const base = { abono: g('vAb').value, adiant13: g('v13').value, obs: g('vObs').value.trim() };
+      const periodos = [{ reg: { ...(f || {}), id: f ? f.id : U.uid('fer'), colabId, inicio, dias, fim: C.fimFerias(inicio, dias), ...base, status: f ? f.status : 'programada', criadoEm: f ? f.criadoEm : agora, criadoPor: f ? f.criadoPor : A.user.usuario }, antigo: f },
+        ...extras.map((x) => ({ reg: { id: U.uid('fer'), colabId, inicio: x.inicio, dias: Number(x.dias), fim: C.fimFerias(x.inicio, Number(x.dias)), ...base, status: 'programada', criadoEm: agora, criadoPor: A.user.usuario }, antigo: null }))];
+      for (const { reg, antigo } of periodos) {
+        if (antigo && antigo.lancou && A.podeEscala(antigo.colabId)) for (const d of antigo.lancou) { const r = A.escalaIdx.get(d); if (r && r.get(antigo.colabId) === sg) ops.push({ s: 'escala', op: 'delete', k: chaveEsc(d, antigo.colabId) }); }
+        reg.lancou = A.podeEscala(colabId) ? [] : ((antigo && antigo.lancou) || []); // só mexe na escala de quem pode (o banco confere)
+        if (lanc && sg && A.podeEscala(colabId)) { reg.lancou = C.diasUteis(reg.inicio, reg.fim); for (const d of reg.lancou) ops.push({ s: 'escala', op: 'put', v: { key: chaveEsc(d, colabId), date: d, colabId, sigla: sg, por: A.user.usuario, em: agora } }); }
+        ops.push({ s: 'ferias', op: 'put', v: reg });
+      }
       const col = A.colab(colabId);
-      await A.commit(ops, { tipo: 'ferias', resumo: `Férias ${f ? 'alteradas' : 'programadas'}: ${col.nome}, ${U.fmtBR(inicio)} a ${U.fmtBR(reg.fim)}`, reversivel: true });
+      await A.commit(ops, { tipo: 'ferias', resumo: `Férias ${f ? 'alteradas' : 'programadas'}: ${col.nome}, ${periodos.map((x) => `${U.fmtBR(x.reg.inicio)} a ${U.fmtBR(x.reg.fim)}`).join(' e ')}`, reversivel: true });
       A.toast('Programação salva.'); A.render();
     } }] });
     return m;
@@ -3311,7 +3348,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     const v = ev || { colabId: A.limitado() ? A.meuColab() : '', tipo: TIPOS[1], data: dataPadrao || A.date, inicio: '', fim: '', situacao: 'previsto', obs: '' };
     const corpo = `<div class="form">
       <label class="f">Tipo<select id="eTipo">${TIPOS.map((t) => `<option ${v.tipo === t ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
-      <label class="f">Colaborador<select id="eCol">${A.limitado() ? '' : '<option value="">— evento geral —</option>'}${A.colabsDoForm().map((c) => `<option value="${c.id}" ${v.colabId === c.id ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select></label>
+      <label class="f">Colaborador<select id="eCol">${A.limitado() ? '' : '<option value="">— evento geral —</option>'}${(A.colabsDoForm().some((c) => c.id === v.colabId) || !A.colab(v.colabId) ? A.colabsDoForm() : [A.colab(v.colabId), ...A.colabsDoForm()]).map((c) => `<option value="${c.id}" ${v.colabId === c.id ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select></label>
       <label class="f">Data *<input type="date" id="eData" value="${v.data}"></label>
       <label class="f">Situação<select id="eSit"><option value="previsto" ${v.situacao === 'previsto' ? 'selected' : ''}>Previsto</option><option value="realizado" ${v.situacao === 'realizado' ? 'selected' : ''}>Realizado</option><option value="cancelado" ${v.situacao === 'cancelado' ? 'selected' : ''}>Cancelado</option></select></label>
       <label class="f">Horário inicial<input type="time" id="eIni" value="${v.inicio || ''}"></label>
@@ -3342,7 +3379,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       const primeiro = U.mkIso(y, m, 1), ult = U.mkIso(y, m, U.daysInMonth(y, m));
       const ini = U.startOfWeek(primeiro); const fim = U.addDays(U.startOfWeek(ult), 6);
       const evs = A.data.eventos.filter((e) => (!f.tipo || e.tipo === f.tipo) && (!f.colabId || e.colabId === f.colabId) && (!f.sit || e.situacao === f.sit) && (!A.filtroAtivo() || !e.colabId || A.passaFiltro(A.colab(e.colabId))));
-      const anivs = (!f.tipo || f.tipo === 'Aniversário') && !f.sit ? A.visiveis().filter((x) => x.situacao !== 'inativo' && x.aniversario && (!f.colabId || x.id === f.colabId)) : [];
+      const anivs = (!f.tipo || f.tipo === 'Aniversário') && !f.sit ? [...A.visiveis(), ...(A.filtroAtivo() ? [] : (A.data.dir || []))].filter((x) => x.situacao !== 'inativo' && x.aniversario && (!f.colabId || x.id === f.colabId)) : [];
       const doDia = (d) => [...anivs.filter((x) => (x.aniversario.length >= 10 ? x.aniversario.slice(5) : x.aniversario) === d.slice(5)).map((x) => ({ aniv: true, nome: x.nome })), ...evs.filter((e) => e.data === d).map((e) => ({ e }))];
       const prz = (!f.tipo || f.tipo === TIPO_PRAZO) && !f.sit ? A.prazosFerias().filter((p) => !['programado', 'coberto', 'gozado', 'aquisicao'].includes(p.status) && (!f.colabId || p.colabId === f.colabId) && (!A.filtroAtivo() || A.passaFiltro(A.colab(p.colabId)))) : [];
       const hoje = U.todayIso();
@@ -3354,7 +3391,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       const prMes = prz.filter((p) => p.limiteMax >= primeiro && p.limiteMax <= ult);
       c.innerHTML = `<div class="toolbar"><button class="btn sm" id="pm">${A.icon('left')}</button><b style="min-width:150px;text-align:center">${esc(U.MONTHS[m - 1])} de ${y}</b><button class="btn sm" id="nm">${A.icon('right')}</button>
         <select id="ft"><option value="">Todos os tipos</option>${[...TIPOS, TIPO_PRAZO].map((t) => `<option ${f.tipo === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
-        <select id="fc"><option value="">Todos os colaboradores</option>${A.visiveis().map((x) => `<option value="${x.id}" ${f.colabId === x.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select>
+        <select id="fc"><option value="">Todos os colaboradores</option>${(A.filtroAtivo() ? A.visiveis() : [...A.visiveis(), ...(A.data.dir || [])].sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'))).map((x) => `<option value="${x.id}" ${f.colabId === x.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select>
         <select id="fs"><option value="">Qualquer situação</option><option value="previsto" ${f.sit === 'previsto' ? 'selected' : ''}>Previsto</option><option value="realizado" ${f.sit === 'realizado' ? 'selected' : ''}>Realizado</option><option value="cancelado" ${f.sit === 'cancelado' ? 'selected' : ''}>Cancelado</option></select>
         <span class="sp"></span>${A.user && (!A.limitado() || A.meuColab()) ? `<button class="btn pri" id="nev">${A.icon('plus')} Novo evento</button>` : ''}</div>
         ${cartaoPrazos()}${cartaoAvisos()}
@@ -3458,7 +3495,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   A.ui.cfgTab = 'siglas';
 
   const MANUAL = `<div class="manual card"><h2>Manual rápido</h2>
-    <h3>1. Perfis de acesso</h3><p><b>Consulta</b>: enxerga <b>apenas os próprios dados</b> (o restante fica privado) e, só em nome próprio, monta a <b>própria escala</b>, <b>inclui eventos</b> (altera só os que ela mesma registrou) e <b>programa férias e gera MOP</b>; nos formulários de evento e de MOP aparece somente o próprio perfil. Quem tem o cargo <b>Analista III</b> (e setor definido no cadastro) também enxerga e altera a <b>escala do próprio setor</b>, e só dela. <b>Edição</b>: acesso livre — monta a escala de todos, mexe na planta, cadastra colaboradores e gerencia todos os eventos. <b>Administrador</b>: tudo isso, mais usuários, siglas, backup e restauração. O perfil é definido pelo administrador, independente do cargo; para gerentes terem acesso livre, o perfil deles deve ser Edição ou Administrador. No <b>primeiro acesso</b> a pessoa informa identificação e cargo (nome, cargo, matrícula, CPF, admissão, aniversário) e contato (e-mail, telefone); o restante do cadastro (gestão, setor, centro de custo etc.) é preenchido por um gestor. Entra direto se já estiver no cadastro ou num acesso criado antes; se algum dado for novo, um <b>gestor</b> aprova em Configurações &gt; Solicitações de acesso. Cada pessoa entra com seu próprio usuário e senha.</p>
+    <h3>1. Perfis de acesso</h3><p><b>Consulta</b>: enxerga <b>os próprios dados</b> (CPF, telefone, e-mail, férias e MOPs dos outros ficam privados), mas vê o <b>calendário de eventos de todos</b> (sem as observações) e a <b>planta</b> com quem está em cada cadeira e quem está no escritório (siglas sensíveis aparecem como “AUS”); e, só em nome próprio, monta a <b>própria escala</b>, <b>inclui eventos</b> (altera só os que ela mesma registrou) e <b>programa férias e gera MOP</b>; nos formulários de evento e de MOP aparece somente o próprio perfil. Quem tem o cargo <b>Analista III</b> (e setor definido no cadastro) também enxerga e altera a <b>escala do próprio setor</b>, e só dela. <b>Edição</b>: acesso livre — monta a escala de todos, mexe na planta, cadastra colaboradores e gerencia todos os eventos. <b>Administrador</b>: tudo isso, mais usuários, siglas, backup e restauração. O perfil é definido pelo administrador, independente do cargo; para gerentes terem acesso livre, o perfil deles deve ser Edição ou Administrador. No <b>primeiro acesso</b> a pessoa informa identificação e cargo (nome, cargo, matrícula, CPF, admissão, aniversário) e contato (e-mail, telefone); o restante do cadastro (gestão, setor, centro de custo etc.) é preenchido por um gestor. Entra direto se já estiver no cadastro ou num acesso criado antes; se algum dado for novo, um <b>gestor</b> aprova em Configurações &gt; Solicitações de acesso. Cada pessoa entra com seu próprio usuário e senha.</p>
     <h3>2. Montar a escala</h3><p>Em <b>Escala</b>, clique em <b>Editar escala</b>, escolha o pincel (uma sigla) e clique ou arraste sobre as células. Clique no número do dia para aplicar a todos. <b>Gerar por rodízio</b> distribui os dias presenciais automaticamente conforme as regras de cada colaborador. <b>Repetir semana</b> copia uma semana para as próximas. Tudo pode ser desfeito com <b>Desfazer</b>.</p>
     <h3>3. Siglas</h3><p>Em <b>Configurações &gt; Siglas</b> você pode criar, renomear, recolorir, trocar a classificação ou excluir qualquer sigla. Ao renomear, a escala já lançada acompanha o novo nome. Ao excluir uma sigla em uso, você escolhe por qual outra substituir (ou apaga os lançamentos).</p>
     <h3>4. Planta</h3><p><b>Disposição padrão</b> vale para todos os dias (a planta se repete automaticamente). <b>Ajuste do dia</b> vale só para a data. Clique numa cadeira para atribuir; arraste uma cadeira ocupada sobre outra para trocar. Quem está em home office ou ausente nunca ocupa a cadeira no dia. <b>Gestores</b> não seguem a escala: aparecem na lista “Gestores” ao lado e sentam em <b>mesas de gestão</b> (azuis, criadas em “Editar layout” › “+ Mesa de gestão”, ou mudando o tipo de uma cadeira). Essas mesas não entram na capacidade nem na ocupação do rodízio.</p>
