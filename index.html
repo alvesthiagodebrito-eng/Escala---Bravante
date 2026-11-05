@@ -299,6 +299,10 @@ table.t tbody tr:hover td { background: var(--primaria-50); }
 .menu.avisos .it.act { cursor: pointer; font-weight: 600; } .menu.avisos .it.act:hover { background: var(--primaria-100); }
 .pill.gest { background: #D6E3F0; color: #1F4468; border-radius: var(--pill); padding: 2px 9px; font-size: 11px; font-weight: 700; white-space: nowrap; }
 
+.cal .ev.prazo { background: var(--ok-bg); color: var(--ok-tx); }
+.cal .ev.prazo.warn { background: var(--aviso-bg); color: var(--aviso-tx); }
+.cal .ev.prazo.err { background: var(--erro-bg); color: var(--erro-tx); font-weight: 600; }
+
 </style>
 </head>
 <body>
@@ -874,12 +878,51 @@ table.t tbody tr:hover td { background: var(--primaria-50); }
     else { if (!C.emailValido(gestor.email)) p.push('E-mail do gestor'); if (!String(gestor.codigo || '').trim()) p.push('Código do gestor'); }
     return p;
   };
+  /** Agrupa os itens por colaborador (uma MOP por colaborador, com uma linha por período de férias), no máximo 25 linhas cada. */
+  C.agrupaMopsPorColab = (itens) => {
+    const por = new Map(); for (const it of itens) { if (!por.has(it.colabId)) por.set(it.colabId, []); por.get(it.colabId).push(it); }
+    const out = []; for (const [colabId, lista] of por) { lista.sort((a, b) => (a.inicio < b.inicio ? -1 : a.inicio > b.inicio ? 1 : 0)); for (let i = 0; i < lista.length; i += C.MOP_LINHAS) out.push({ colabId, gestorId: lista[0].gestorId, itens: lista.slice(i, i + C.MOP_LINHAS) }); }
+    return out;
+  };
+  /** Nome de quem a MOP é: o colaborador (ou o primeiro + "e outros N" nas MOPs antigas, que juntavam várias pessoas). */
+  C.mopColabNome = (m) => {
+    const nomes = []; for (const i of (m && m.itens) || []) if (i.nome && !nomes.includes(i.nome)) nomes.push(i.nome);
+    return !nomes.length ? '' : nomes.length === 1 ? nomes[0] : `${nomes[0]} e outros ${nomes.length - 1}`;
+  };
+  /** Situações da MOP: aguardando (gestor decide) → aprovada → enviada; ou reprovada / cancelada. MOPs antigas ("gerada") contam como aguardando. */
+  C.MOP_STATUS = { aguardando: ['Aguardando aprovação', 'warn'], aprovada: ['Aprovada', 'presencial'], reprovada: ['Reprovada', 'err'], enviada: ['Enviada', 'ok'], cancelada: ['Cancelada', 'ausente'] };
+  C.statusMop = (m) => { const s = m && m.status; return !s || s === 'gerada' ? 'aguardando' : (C.MOP_STATUS[s] ? s : 'aguardando'); };
+  C.FERIAS_DIAS = 30; C.FERIAS_PERIODOS = 3;
+  /**
+   * Confere a divisão das férias de UM colaborador: linhas [{inicio, dias, abono}].
+   * erros bloqueiam (dias inválidos, sobreposição, mais de 30 dias, mais de 3 períodos); avisos só informam.
+   */
+  C.validaPeriodos = (linhas) => {
+    const erros = []; const avisos = []; let total = 0;
+    linhas.forEach((l, i) => {
+      const n = i + 1; const d = Number(l.dias);
+      if (!l.inicio) erros.push(`Período ${n}: informe o início.`);
+      if (!(Number.isInteger(d) && d >= 1 && d <= C.FERIAS_DIAS)) erros.push(`Período ${n}: os dias devem ser um número inteiro de 1 a ${C.FERIAS_DIAS}.`); else total += d;
+    });
+    if (linhas.length > C.FERIAS_PERIODOS) erros.push(`As férias podem ser divididas em no máximo ${C.FERIAS_PERIODOS} períodos.`);
+    if (total > C.FERIAS_DIAS) erros.push(`Os períodos somam ${total} dias; o máximo é ${C.FERIAS_DIAS}.`);
+    const ok = linhas.filter((l) => l.inicio && Number.isInteger(Number(l.dias)) && Number(l.dias) >= 1).map((l, i) => ({ i, ini: l.inicio, fim: C.fimFerias(l.inicio, Number(l.dias)) })).sort((a, b) => (a.ini < b.ini ? -1 : 1));
+    for (let k = 1; k < ok.length; k++) if (ok[k].ini <= ok[k - 1].fim) { erros.push('Há períodos que se sobrepõem.'); break; }
+    if (!erros.length) {
+      if (linhas.length > 1 && !linhas.some((l) => Number(l.dias) >= 14)) avisos.push('Quando as férias são divididas, um dos períodos deve ter pelo menos 14 dias corridos.');
+      if (total < C.FERIAS_DIAS && !linhas.some((l) => l.abono === 'Sim')) avisos.push(`Os períodos somam ${total} dia(s); restam ${C.FERIAS_DIAS - total} para programar.`);
+      if (linhas.some((l) => l.abono === 'Sim') && total > C.FERIAS_DIAS - 10) avisos.push(`Com abono pecuniário (venda de 10 dias), o gozo é de no máximo ${C.FERIAS_DIAS - 10} dias.`);
+    }
+    return { erros, avisos, total, restam: Math.max(0, C.FERIAS_DIAS - total) };
+  };
   C.mesRotulo = (m) => U.MONTHS[m - 1].charAt(0).toUpperCase() + U.MONTHS[m - 1].slice(1);
 
   /** Variáveis dos modelos de e-mail. */
   C.preenche = (modelo, vars) => String(modelo || '').replace(/\{(\w+)\}/g, (m, k) => (vars[k] != null ? vars[k] : m));
-  C.EMAIL_MOP_ASSUNTO = 'MOP de Férias — {mes}/{ano} — {gestor}';
-  C.EMAIL_MOP_CORPO = 'Olá, {gestorPrimeiro}.\n\nSegue em anexo a MOP (Movimentação de Pessoal) de férias referente a {mes}/{ano}, com {qtd} colaborador(es):\n\n{lista}\n\nPor favor, confira e encaminhe conforme o fluxo de aprovação.\n\nAtenciosamente,\n{remetente}';
+  C.EMAIL_MOP_ASSUNTO_ANTIGO = 'MOP de Férias — {mes}/{ano} — {gestor}';
+  C.EMAIL_MOP_CORPO_ANTIGO = 'Olá, {gestorPrimeiro}.\n\nSegue em anexo a MOP (Movimentação de Pessoal) de férias referente a {mes}/{ano}, com {qtd} colaborador(es):\n\n{lista}\n\nPor favor, confira e encaminhe conforme o fluxo de aprovação.\n\nAtenciosamente,\n{remetente}';
+  C.EMAIL_MOP_ASSUNTO = 'MOP de Férias — {mes}/{ano} — {colaborador}';
+  C.EMAIL_MOP_CORPO = 'Olá.\n\nSegue em anexo a MOP (Movimentação de Pessoal) de férias de {colaborador}, referente a {mes}/{ano}, já aprovada por {gestor}:\n\n{lista}\n\nPor favor, formalize as férias conforme o fluxo.\n\nAtenciosamente,\n{remetente}';
 
   /* ---------- e-mail (.eml) ---------- */
   const b64 = (bytes) => { let s = ''; const CH = 0x8000; for (let i = 0; i < bytes.length; i += CH) s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH)); return (typeof btoa !== 'undefined' ? btoa(s) : Buffer.from(s, 'binary').toString('base64')); };
@@ -916,6 +959,139 @@ table.t tbody tr:hover td { background: var(--primaria-50); }
   root.Escala = root.Escala || {};
   root.Escala.Cad = C;
   if (typeof module !== 'undefined' && module.exports) module.exports = C;
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+<script>
+/* Prazo máximo para tirar férias (vem da planilha da folha): leitura, vínculo com o cadastro (matrícula e nome) e alertas. Sem dependência de tela. */
+(function (root) {
+  'use strict';
+  const U = (root.Escala && root.Escala.U) || {};
+  const Pz = {};
+
+  const semAcento = (s) => String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const cab = (s) => semAcento(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+  /** Matrícula só com dígitos e sem zeros à esquerda ("007040" = "7040"). */
+  Pz.normMat = (s) => String(s == null ? '' : s).replace(/\D/g, '').replace(/^0+/, '');
+  Pz.normNome = (s) => semAcento(s).toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+
+  /** A folha corta o nome em 30 letras; o cadastro pode ter só o primeiro nome. */
+  Pz.nomeIgual = (cadastro, arquivo) => {
+    const a = Pz.normNome(cadastro), b = Pz.normNome(arquivo); if (!a || !b) return false;
+    if (a === b) return true;
+    if (b.length >= 28 && a.startsWith(b)) return true; // nome truncado pela folha
+    if (a.length >= 28 && b.startsWith(a)) return true;
+    return false;
+  };
+  Pz.nomeConfere = (cadastro, arquivo) => {
+    if (Pz.nomeIgual(cadastro, arquivo)) return true;
+    const a = Pz.normNome(cadastro).split(' '), b = Pz.normNome(arquivo).split(' ');
+    if (a.length === 1) return a[0] === b[0]; // cadastro só com o primeiro nome
+    return a[0] === b[0] && a[a.length - 1] === b[b.length - 1];
+  };
+
+  const iso = (d) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  /** Data de uma célula: Date, texto dd/mm/aaaa ou número de série do Excel. */
+  Pz.data = (v) => {
+    if (v == null || v === '') return '';
+    if (v instanceof Date) return isNaN(v) ? '' : iso(v);
+    if (typeof v === 'number') return v > 20000 && v < 80000 ? iso(new Date(Math.round((v - 25569) * 86400000))) : '';
+    const m = String(v).match(/(\d{2})\/(\d{2})\/(\d{4})/); if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+    const n = String(v).match(/^(\d{4})-(\d{2})-(\d{2})/); return n ? `${n[1]}-${n[2]}-${n[3]}` : '';
+  };
+  const datasDoTexto = (t) => [...String(t == null ? '' : t).matchAll(/(\d{2})\/(\d{2})\/(\d{4})/g)].map((m) => `${m[3]}-${m[2]}-${m[1]}`);
+  const num = (v) => { if (typeof v === 'number') return v; const m = String(v == null ? '' : v).replace(',', '.').match(/-?\d+(\.\d+)?/); return m ? Number(m[0]) : 0; };
+  const txt = (v) => (v == null ? '' : v instanceof Date ? iso(v) : (v.richText ? v.richText.map((x) => x.text).join('') : (v.result != null ? String(v.result) : String(v)))).trim();
+
+  const COLS = { matricula: ['matricula'], nome: ['nome'], centroCusto: ['centrocusto'], admissao: ['dataadmis', 'dataadmissao'], periodo: ['periodoaquisitivo'], limiteIdeal: ['dtlimiteideal'], limiteMax: ['dtlimitemaxima'], vencidas: ['feriasvencidas'], proporc: ['feriasproporc'], prog: ['progfer'], diasFer: ['diasfer'], diasAbo: ['diasabo'] };
+
+  /**
+   * Lê as linhas da planilha da folha ("Cabeçalho de Férias"): uma linha por período aquisitivo.
+   * linhas: matriz (array de arrays) como vem da planilha. Devolve { periodos, erro }.
+   */
+  Pz.parse = (linhas) => {
+    let h = -1, mapa = null;
+    for (let r = 0; r < Math.min(linhas.length, 20); r++) {
+      const cand = {}; (linhas[r] || []).forEach((v, c) => { const t = cab(txt(v)); for (const [k, sin] of Object.entries(COLS)) if (sin.includes(t) && !(k in cand)) cand[k] = c; });
+      if (cand.matricula != null && cand.nome != null && cand.limiteMax != null) { h = r; mapa = cand; break; }
+    }
+    if (!mapa) return { periodos: [], erro: 'Não encontrei as colunas “Matricula”, “Nome” e “Dt.Limite Maxima”. Envie a planilha “Cabeçalho de Férias” da folha.' };
+    const periodos = [];
+    for (let r = h + 1; r < linhas.length; r++) {
+      const L = linhas[r] || []; const g = (k) => { const v = mapa[k] == null ? undefined : L[mapa[k]]; return v && typeof v === 'object' && !(v instanceof Date) && v.result !== undefined ? v.result : v; };
+      const matricula = txt(g('matricula')); const nome = txt(g('nome')); if (!matricula && !nome) continue;
+      const ds = datasDoTexto(txt(g('periodo'))); const prog = datasDoTexto(txt(g('prog')));
+      const limiteMax = Pz.data(g('limiteMax')); if (!limiteMax) continue;
+      periodos.push({ matricula, nome, centroCusto: txt(g('centroCusto')), admissao: Pz.data(g('admissao')), periodoIni: ds[0] || '', periodoFim: ds[1] || '', limiteIdeal: Pz.data(g('limiteIdeal')), limiteMax,
+        vencidas: num(g('vencidas')), proporc: num(g('proporc')), progIni: prog.length >= 2 ? prog[0] : '', progFim: prog.length >= 2 ? prog[1] : '',
+        diasFer: num(/D\.FER\.\s*([\d.,]+)/i.test(txt(g('diasFer'))) ? txt(g('diasFer')).match(/D\.FER\.\s*([\d.,]+)/i)[1] : 0),
+        diasAbono: num(/D\.AB\.\s*([\d.,]+)/i.test(txt(g('diasAbo'))) ? txt(g('diasAbo')).match(/D\.AB\.\s*([\d.,]+)/i)[1] : 0) });
+    }
+    return { periodos, erro: periodos.length ? '' : 'A planilha não tem linhas de férias.' };
+  };
+
+  /**
+   * Liga as pessoas da planilha ao cadastro: primeiro pela matrícula (confere o nome); sem matrícula igual, pelo nome completo
+   * (só se o cadastro não tiver outra matrícula e o nome for único). Quem não está no cadastro é ignorado (reimporte depois de cadastrar).
+   */
+  Pz.vincula = (periodos, colabs) => {
+    const por = new Map();
+    for (const p of periodos) { const k = Pz.normMat(p.matricula) || 'n:' + Pz.normNome(p.nome); if (!por.has(k)) por.set(k, { mat: Pz.normMat(p.matricula), matricula: p.matricula, nome: p.nome, periodos: [] }); por.get(k).periodos.push(p); }
+    const ativos = colabs.filter((c) => c.situacao !== 'inativo');
+    const ligados = []; const ignorados = []; const ambiguos = []; const conflitos = []; const usados = new Set();
+    for (const g of por.values()) {
+      let cands = g.mat ? ativos.filter((c) => Pz.normMat(c.matricula) === g.mat) : [];
+      if (cands.length > 1) { ambiguos.push({ nome: g.nome, matricula: g.matricula, motivo: 'matrícula repetida no cadastro' }); continue; }
+      let metodo = 'matricula';
+      if (!cands.length) {
+        metodo = 'nome'; const nm = ativos.filter((c) => Pz.normNome(c.nome).split(' ').length >= 2 && Pz.nomeIgual(c.nome, g.nome));
+        const livres = nm.filter((c) => !Pz.normMat(c.matricula));
+        if (nm.length && !livres.length) { conflitos.push({ nome: g.nome, matricula: g.matricula, motivo: 'mesmo nome, mas outra matrícula no cadastro' }); continue; }
+        if (livres.length > 1) { ambiguos.push({ nome: g.nome, matricula: g.matricula, motivo: 'mais de um cadastro com este nome' }); continue; }
+        cands = livres;
+      }
+      if (!cands.length) { ignorados.push(g); continue; }
+      const colab = cands[0]; if (usados.has(colab.id)) { ambiguos.push({ nome: g.nome, matricula: g.matricula, motivo: 'cadastro já ligado a outra matrícula da planilha' }); continue; } usados.add(colab.id);
+      ligados.push({ colab, metodo, confere: Pz.nomeConfere(colab.nome, g.nome), nomeArquivo: g.nome, matricula: g.matricula, periodos: g.periodos });
+    }
+    return { ligados, ignorados, ambiguos, conflitos };
+  };
+
+  /** Registro gravado (um por período aquisitivo de cada pessoa ligada). */
+  Pz.registro = (colab, p, quando, por) => ({ id: `pz-${colab.id}-${p.periodoIni || p.limiteMax}`, colabId: colab.id, matricula: p.matricula, nome: p.nome, periodoIni: p.periodoIni, periodoFim: p.periodoFim, limiteIdeal: p.limiteIdeal, limiteMax: p.limiteMax,
+    vencidas: p.vencidas, proporc: p.proporc, progIni: p.progIni, progFim: p.progFim, diasFer: p.diasFer, diasAbono: p.diasAbono, importadoEm: quando, importadoPor: por });
+
+  const dif = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 86400000);
+  const ADD = (d, n) => { const t = new Date(Date.parse(d + 'T00:00:00Z') + n * 86400000); return iso(t); };
+
+  /**
+   * Situação de cada período com férias a gozar. cobre(colabId) → férias já programadas no painel [{inicio, fim, dias, abono}].
+   * status: vencido | critico (até 30 dias) | atencao (até avisoDias) | ok | programado (folha) | coberto (painel) | fora (programado depois do limite). "Já gozado" não entra.
+   */
+  Pz.situacoes = (regs, o) => {
+    const hoje = o.hoje; const aviso = o.avisoDias || 90; const out = [];
+    for (const p of regs) {
+      if (!(p.vencidas > 0) || !p.limiteMax) continue;
+      const faltam = dif(hoje, p.limiteMax); let status;
+      if (p.progIni && p.progFim) {
+        if (p.progFim < hoje) continue; // já gozadas
+        status = p.progIni > p.limiteMax ? 'fora' : 'programado';
+      } else {
+        const lista = ((o.cobre && o.cobre(p.colabId)) || []).filter((f) => f.fim >= hoje && f.inicio <= p.limiteMax);
+        const dias = lista.reduce((n, f) => n + Number(f.dias || 0) + (f.abono === 'Sim' ? 10 : 0), 0);
+        status = lista.length && dias >= p.vencidas ? 'coberto' : faltam < 0 ? 'vencido' : faltam <= 30 ? 'critico' : faltam <= aviso ? 'atencao' : 'ok';
+      }
+      out.push({ ...p, faltam, status, alerta: ['vencido', 'critico', 'atencao', 'fora'].includes(status) });
+    }
+    return out.sort((a, b) => (a.limiteMax < b.limiteMax ? -1 : a.limiteMax > b.limiteMax ? 1 : 0));
+  };
+  Pz.ROTULO = { vencido: ['Vencido', 'err'], critico: ['Vence em até 30 dias', 'err'], atencao: ['Atenção', 'warn'], ok: ['No prazo', 'ok'], programado: ['Programado na folha', 'ok'], coberto: ['Programado no painel', 'ok'], fora: ['Programado depois do limite', 'err'] };
+  Pz.faltamTexto = (n) => (n < 0 ? `vencido há ${-n} dia(s)` : n === 0 ? 'vence hoje' : n === 1 ? 'falta 1 dia' : `faltam ${n} dias`);
+  Pz.add = ADD; Pz.dif = dif;
+
+  root.Escala = root.Escala || {};
+  root.Escala.Prazos = Pz;
+  if (typeof module !== 'undefined' && module.exports) module.exports = Pz;
 })(typeof window !== 'undefined' ? window : globalThis);
 
 </script>
@@ -1240,7 +1416,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   const esc = U.esc; A.esc = esc;
 
   /* ---------- dados (servidor) ---------- */
-  const NOMES = ['colaboradores', 'escala', 'cadeiras', 'elementos', 'atribuicoes', 'eventos', 'configuracoes', 'historico', 'ferias', 'mops'];
+  const NOMES = ['colaboradores', 'escala', 'cadeiras', 'elementos', 'atribuicoes', 'eventos', 'configuracoes', 'historico', 'ferias', 'mops', 'prazos'];
   const RANK = { consulta: 0, edicao: 1, admin: 2 };
   A.user = null; A.rev = 0;
   /** Verifica o perfil do usuário logado: A.can('edicao'), A.can('admin'). */
@@ -1323,6 +1499,11 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     if (!c) return true;
     if (cad.tipo === 'gestao') return A.foraEscala(c) || A.ehGestor(c);
     return !A.foraEscala(c);
+  };
+  /** Analista(s) III ativos do mesmo setor do colaborador (vão em cópia no e-mail da MOP). */
+  A.analistas3 = (col) => {
+    const set = U.normName((col && col.setor) || ''); if (!set) return [];
+    return [...(A._porId ? A._porId.values() : A.data.colaboradores)].filter((c) => c.id !== col.id && c.situacao !== 'inativo' && U.normName(c.cargo || '') === 'analista iii' && U.normName(c.setor || '') === set);
   };
   A.datasComEscala = () => [...A.escalaIdx.keys()].sort();
 
@@ -2217,7 +2398,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   const LINHAS = C.MOP_LINHAS;
   const NOTA = '*Solicitante deverá ser Supervisor, Coordenador ou Gerente com exceção de férias, podendo ser o responsável interino.';
 
-  M.nomeArquivo = (m) => `MOP_Ferias_${C.mesRotulo(m.mes)}_${m.ano}_${U.stripAccents(m.gestorNome || 'gestor').replace(/[^A-Za-z0-9]+/g, '_')}_${m.num}.xlsx`;
+  M.nomeArquivo = (m) => `MOP_Ferias_${C.mesRotulo(m.mes)}_${m.ano}_${U.stripAccents(C.mopColabNome(m) || 'colaborador').replace(/[^A-Za-z0-9]+/g, '_')}_${m.num}.xlsx`;
   const dataUtc = (iso) => (iso ? new Date(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10))) : null);
 
   /** Gera o arquivo .xlsx da MOP (mesmo layout, cores, cabeçalho e logo do modelo da empresa). */
@@ -2330,7 +2511,13 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   const M = (E.Mail = {});
 
   /** Modelos de e-mail da MOP (editáveis em Configurações > E-mails). */
-  M.modeloMop = () => ({ assunto: C.EMAIL_MOP_ASSUNTO, corpo: C.EMAIL_MOP_CORPO, cc: [], copiarColabs: true, ...(A.cfg('mailMop', {}) || {}) });
+  /** Modelo do e-mail da MOP. Textos antigos (que usavam o nome do gestor) passam para o novo padrão; textos que a pessoa mudou ficam como estão. */
+  M.modeloMop = () => {
+    const m = { assunto: C.EMAIL_MOP_ASSUNTO, corpo: C.EMAIL_MOP_CORPO, para: [], cc: [], copiarColabs: true, copiarAnalista3: true, ...(A.cfg('mailMop', {}) || {}) };
+    if (m.assunto === C.EMAIL_MOP_ASSUNTO_ANTIGO) m.assunto = C.EMAIL_MOP_ASSUNTO;
+    if (m.corpo === C.EMAIL_MOP_CORPO_ANTIGO) m.corpo = C.EMAIL_MOP_CORPO;
+    return m;
+  };
   M.parseLista = (txt) => String(txt || '').split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean);
 
   const toHtml = (texto) => `<div style="font-family:Segoe UI,Calibri,Arial,sans-serif;font-size:14px;color:#1C2325;white-space:pre-wrap">${esc(texto)}</div>`;
@@ -2751,34 +2938,96 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   }
 
   /* =============== MOP =============== */
-  const proxNumero = (ano) => { const n = A.data.mops.filter((m) => m.ano === ano).length + 1; return `MOP-${ano}-${String(n).padStart(4, '0')}`; };
+  /** Número da MOP: ano + matrícula + sequência da pessoa (assim não repete entre colaboradores que só enxergam as próprias MOPs). */
+  const numeroMop = (col, ano) => {
+    const mat = String(col.matricula || '').replace(/[^A-Za-z0-9]/g, '') || 'S' + col.id.slice(-4);
+    const n = A.data.mops.filter((x) => x.ano === ano && (x.itens || []).some((i) => i.colabId === col.id)).length + 1;
+    return `MOP-${ano}-${mat}-${String(n).padStart(2, '0')}`;
+  };
+  const stMop = (m) => { const k = C.statusMop(m); return `<span class="pill ${C.MOP_STATUS[k][1]}">${C.MOP_STATUS[k][0]}</span>`; };
+  /** Quem aprova: o gestor da MOP, um superior dele ou o administrador (o banco confere de novo). */
+  const souGestorDe = (m) => { const eu = A.meuColab(); return !!eu && C.cadeiaGestores({ gestorId: m.gestorId }, A._porId || new Map()).includes(eu); };
+  const podeDecidir = (m) => A.can('admin') || souGestorDe(m);
+  const aguardandoMim = () => A.data.mops.filter((m) => C.statusMop(m) === 'aguardando' && podeDecidir(m));
+  A.pendMopsAprovar = () => (A.data && A.data.mops ? aguardandoMim().length : 0);
 
+  /** Gerar MOP: uma MOP por colaborador, com uma linha por período; dá para dividir as férias (até 3 períodos, 30 dias no total). */
   async function gerarMop(ids) {
     const sel = ids.map((id) => A.data.ferias.find((f) => f.id === id)).filter((f) => f && f.status === 'programada');
     if (!sel.length) { A.toast('Marque ao menos uma programação (ainda sem MOP).', 'warn'); return; }
-    const ok = []; const ruins = [];
-    for (const f of sel) { const col = A.colab(f.colabId); const g = col && A.gestor(col.gestorId); const p = col ? C.pendenciasMop(col, g) : ['Colaborador']; (p.length ? ruins : ok).push({ f, col, g, p }); }
-    const primeira = sel.map((f) => f.inicio).sort()[0]; const ano0 = +primeira.slice(0, 4), mes0 = +primeira.slice(5, 7);
-    const anos = [ano0 - 1, ano0, ano0 + 1];
-    A.modal({ titulo: 'Gerar MOP de férias', size: 'md', corpo: `
-      ${ruins.length ? `<div class="alert warn">${A.icon('warn')}<div><b>${ruins.length} colaborador(es) com pendência de cadastro (não entram nesta MOP):</b><ul class="lista">${ruins.map((r) => `<li>${esc(r.col ? r.col.nome : '?')}: falta ${esc(r.p.join(', '))}</li>`).join('')}</ul>Complete em Colaboradores / Gestores e gere de novo.</div></div>` : ''}
-      ${ok.some((r) => !r.col.centroCusto || !r.col.admissao) ? `<div class="alert warn">${A.icon('warn')}<div>Sem centro de custo ou admissão no cadastro (saem em branco na MOP): ${esc(ok.filter((r) => !r.col.centroCusto || !r.col.admissao).map((r) => r.col.nome.split(' ')[0]).join(', '))}.</div></div>` : ''}
-      ${ok.length ? `<div class="help"><b>${ok.length}</b> colaborador(es) serão incluídos. Será gerada <b>uma MOP por gestor</b> (até ${C.MOP_LINHAS} colaboradores em cada, como no formulário).</div>
+    const porCol = new Map(); for (const f of sel) { if (!porCol.has(f.colabId)) porCol.set(f.colabId, []); porCol.get(f.colabId).push(f); }
+    const cards = []; const ruins = []; const hoje = U.todayIso(); const sg = siglaFerias();
+    for (const [colabId, fs] of porCol) {
+      const col = A.colab(colabId); const g = col && A.gestor(col.gestorId); const p = col ? C.pendenciasMop(col, g) : ['Colaborador'];
+      if (p.length) { ruins.push({ col, p }); continue; }
+      fs.sort((a, b) => (a.inicio < b.inicio ? -1 : 1));
+      cards.push({ col, g, fs, linhas: fs.map((f) => ({ fid: f.id, inicio: f.inicio, dias: f.dias, abono: f.abono || 'Não', adiant13: f.adiant13 || 'Não' })),
+        lancar: fs.some((f) => f.lancou && f.lancou.length), podeLancar: !!sg && A.podeEscala(colabId), nota: '' });
+    }
+    const primeira = sel.map((f) => f.inicio).sort()[0]; const ano0 = +primeira.slice(0, 4), mes0 = +primeira.slice(5, 7); const anos = [ano0 - 1, ano0, ano0 + 1];
+    const sn = (v) => ['Não', 'Sim'].map((o) => `<option ${v === o ? 'selected' : ''}>${o}</option>`).join('');
+    const ordinal = (n) => ['segunda', 'terceira'][n - 1];
+    let mm = null;
+    const cardHtml = (cd, ci) => `<div class="card mopcard" data-ci="${ci}" style="margin-bottom:12px"><h3 style="margin:0 0 6px">${esc(cd.col.nome)} <span class="small muted">· gestão: ${esc(cd.g.nome)}</span></h3>
+      <div class="tablewrap"><table class="t"><thead><tr><th></th><th>Início *</th><th>Dias *</th><th>Último dia</th><th>Abono (10 dias)</th><th>13º</th><th></th></tr></thead><tbody>
+      ${cd.linhas.map((l, li) => `<tr data-li="${li}"><td><b>${li + 1}º</b></td><td><input type="date" data-k="inicio" value="${esc(l.inicio)}"></td><td><input type="number" data-k="dias" min="1" max="${C.FERIAS_DIAS}" value="${esc(l.dias)}" style="width:72px"></td><td data-fim class="small"></td><td><select data-k="abono">${sn(l.abono)}</select></td><td><select data-k="adiant13">${sn(l.adiant13)}</select></td><td>${l.fid ? '' : `<button class="btn sm perigo" data-rm title="Remover este período" aria-label="Remover período">${A.icon('x')}</button>`}</td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="toolbar" style="margin-top:8px">${cd.linhas.length < C.FERIAS_PERIODOS ? `<button class="btn sm" data-add>${A.icon('plus')} Adicionar ${ordinal(cd.linhas.length)} programação</button>` : '<span class="small muted">Máximo de períodos atingido.</span>'}<span class="sp"></span><b class="small" data-resumo></b></div>
+      ${cd.nota ? `<div class="small muted">${esc(cd.nota)}</div>` : ''}
+      ${cd.podeLancar ? `<label class="chk" style="margin-top:6px"><input type="checkbox" data-lanc ${cd.lancar ? 'checked' : ''}> Lançar “${esc(sg)}” na escala nos dias úteis dos períodos</label>` : ''}
+      <div data-av style="margin-top:8px"></div></div>`;
+    const atualiza = (ci) => {
+      const cd = cards[ci]; const el = A.$(`.mopcard[data-ci="${ci}"]`, mm.el); const v = C.validaPeriodos(cd.linhas);
+      A.$$('tbody tr', el).forEach((tr, li) => { const l = cd.linhas[li]; const fim = C.fimFerias(l.inicio, Number(l.dias)); A.$('[data-fim]', tr).textContent = fim ? U.fmtBR(fim) : '—'; });
+      A.$('[data-resumo]', el).textContent = `Total: ${v.total} de ${C.FERIAS_DIAS} dias${v.restam ? ` · restam ${v.restam}` : ''}`;
+      const idsLinhas = new Set(cd.linhas.map((l) => l.fid).filter(Boolean)); const outras = A.data.ferias.filter((x) => !idsLinhas.has(x.id));
+      const av = []; cd.linhas.forEach((l, li) => { for (const t of C.avisosFerias({ id: l.fid || 'novo' + li, colabId: cd.col.id, inicio: l.inicio, dias: Number(l.dias) }, cd.col, outras, hoje)) av.push(cd.linhas.length > 1 ? `Período ${li + 1}: ${t}` : t); });
+      A.$('[data-av]', el).innerHTML = v.erros.map((t) => `<div class="alert err">${A.icon('warn')}<div>${esc(t)}</div></div>`).join('') + [...v.avisos, ...av].map((t) => `<div class="alert warn">${A.icon('warn')}<div>${esc(t)}</div></div>`).join('');
+    };
+    const liga = (ci) => {
+      const cd = cards[ci]; const el = A.$(`.mopcard[data-ci="${ci}"]`, mm.el);
+      A.$$('tbody tr', el).forEach((tr, li) => {
+        A.$$('[data-k]', tr).forEach((inp) => { const h = () => { cd.linhas[li][inp.dataset.k] = inp.dataset.k === 'dias' ? inp.value : inp.value; atualiza(ci); }; inp.oninput = h; inp.onchange = h; });
+        const rm = A.$('[data-rm]', tr); if (rm) rm.onclick = () => { cd.linhas.splice(li, 1); cd.nota = ''; desenha(); };
+      });
+      const add = A.$('[data-add]', el); if (add) add.onclick = () => {
+        let total = cd.linhas.reduce((n, l) => n + (Number.isInteger(Number(l.dias)) ? Number(l.dias) : 0), 0);
+        if (cd.linhas.length === 1 && total >= C.FERIAS_DIAS) { cd.linhas[0].dias = 15; total = 15; cd.nota = 'Dividi os 30 dias em 15 + 15. Ajuste os dias e informe o início do novo período.'; }
+        cd.linhas.push({ fid: null, inicio: '', dias: Math.max(C.FERIAS_DIAS - total, 0) || '', abono: cd.linhas[0].abono, adiant13: cd.linhas[0].adiant13 }); desenha();
+      };
+      const lc = A.$('[data-lanc]', el); if (lc) lc.onchange = () => { cd.lancar = lc.checked; };
+      atualiza(ci);
+    };
+    const desenha = () => { const box = A.$('#mCards', mm.el); box.innerHTML = cards.map(cardHtml).join(''); cards.forEach((_, ci) => liga(ci)); };
+    mm = A.modal({ titulo: 'Gerar MOP de férias', size: 'lg', corpo: `
+      ${ruins.length ? `<div class="alert warn">${A.icon('warn')}<div><b>${ruins.length} colaborador(es) com pendência de cadastro (não entram):</b><ul class="lista">${ruins.map((r) => `<li>${esc(r.col ? r.col.nome : '?')}: falta ${esc(r.p.join(', '))}</li>`).join('')}</ul>Complete em Colaboradores e gere de novo.</div></div>` : ''}
+      ${cards.some((r) => !r.col.centroCusto || !r.col.admissao) ? `<div class="alert warn">${A.icon('warn')}<div>Sem centro de custo ou admissão no cadastro (saem em branco na MOP): ${esc(cards.filter((r) => !r.col.centroCusto || !r.col.admissao).map((r) => r.col.nome.split(' ')[0]).join(', '))}.</div></div>` : ''}
+      ${cards.length ? `<div class="help">Será gerada <b>uma MOP por colaborador</b>, com uma linha para cada período de férias. Para <b>dividir as férias</b> (30 dias no total, até 3 períodos), use <b>Adicionar segunda programação</b>. Depois de gerada, a MOP fica disponível para o <b>gestor aprovar</b>; só com a aprovação o e-mail é liberado.</div>
+      <div id="mCards"></div>
       <div class="form"><label class="f">Ano da competência<select id="mAno">${anos.map((a) => `<option ${a === ano0 ? 'selected' : ''}>${a}</option>`).join('')}</select></label>
       <label class="f">Mês para lançamento<select id="mMes">${U.MONTHS.map((n, i) => `<option value="${i + 1}" ${i + 1 === mes0 ? 'selected' : ''}>${C.mesRotulo(i + 1)}</option>`).join('')}</select></label>
-      <label class="f full">Observações da MOP (opcional)<textarea id="mObs" rows="3" maxlength="600"></textarea></label></div>` : '<p>Não há ninguém apto a entrar na MOP agora.</p>'}`,
-    botoes: [{ label: 'Cancelar' }, ...(ok.length ? [{ label: 'Gerar MOP', cls: 'pri', onClick: async (mm) => {
-      const ano = Number(A.$('#mAno', mm.el).value), mes = Number(A.$('#mMes', mm.el).value), obs = A.$('#mObs', mm.el).value.trim();
-      const itens = ok.map((r) => ({ ...C.itemMop(r.f, r.col), gestorId: r.g.id })).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
-      const grupos = C.agrupaMops(itens); const ops = []; const novas = []; let seq = A.data.mops.filter((x) => x.ano === ano).length;
-      for (const gr of grupos) {
-        const g = A.gestor(gr.gestorId); seq++;
-        const mop = { id: U.uid('mop'), num: `MOP-${ano}-${String(seq).padStart(4, '0')}`, ano, mes, gestorId: g.id, gestorNome: g.nome, gestorEmail: g.email, codigoGestor: g.codigo, itens: gr.itens.map(({ gestorId, ...i }) => i), obs, status: 'gerada', geradoEm: new Date().toISOString(), geradoPor: A.user.usuario, geradoPorNome: A.user.nome };
+      <label class="f full">Observações da MOP (opcional)<textarea id="mObs" rows="2" maxlength="600"></textarea></label></div>` : '<p>Não há ninguém apto a entrar na MOP agora.</p>'}`,
+    onMount: (ctx) => { mm = ctx; if (cards.length) desenha(); },
+    botoes: [{ label: 'Cancelar' }, ...(cards.length ? [{ label: 'Gerar MOP', cls: 'pri', onClick: async (m2) => {
+      for (const cd of cards) { const v = C.validaPeriodos(cd.linhas); if (v.erros.length) { A.toast(`${cd.col.nome.split(' ')[0]}: ${v.erros[0]}`, 'warn'); return false; } }
+      const ano = Number(A.$('#mAno', m2.el).value), mes = Number(A.$('#mMes', m2.el).value), obs = A.$('#mObs', m2.el).value.trim(); const agora = new Date().toISOString();
+      const ops = []; const novas = [];
+      for (const cd of cards) {
+        const regs = cd.linhas.map((l) => {
+          const f = l.fid ? A.data.ferias.find((x) => x.id === l.fid) : null; const dias = Number(l.dias); const fim = C.fimFerias(l.inicio, dias);
+          const reg = { ...(f || { id: U.uid('fer'), colabId: cd.col.id, obs: '', criadoEm: agora, criadoPor: A.user.usuario, lancou: [] }), inicio: l.inicio, dias, fim, abono: l.abono, adiant13: l.adiant13 };
+          const mudou = !f || f.inicio !== l.inicio || Number(f.dias) !== dias;
+          if (f && mudou && f.lancou && f.lancou.length && cd.podeLancar) { for (const d of f.lancou) { const r = A.escalaIdx.get(d); if (r && r.get(cd.col.id) === sg) ops.push({ s: 'escala', op: 'delete', k: chaveEsc(d, cd.col.id) }); } reg.lancou = []; }
+          if (cd.podeLancar && cd.lancar && mudou) { reg.lancou = C.diasUteis(l.inicio, fim); for (const d of reg.lancou) ops.push({ s: 'escala', op: 'put', v: { key: chaveEsc(d, cd.col.id), date: d, colabId: cd.col.id, sigla: sg, por: A.user.usuario, em: agora } }); }
+          return reg;
+        });
+        const itens = C.agrupaMopsPorColab(regs.map((r) => ({ ...C.itemMop(r, cd.col), gestorId: cd.g.id })))[0].itens;
+        const g = cd.g; const mop = { id: U.uid('mop'), num: numeroMop(cd.col, ano), ano, mes, gestorId: g.id, gestorNome: g.nome, gestorEmail: g.email, codigoGestor: g.codigo, colabId: cd.col.id, itens: itens.map(({ gestorId, ...i }) => i), obs, status: 'aguardando', geradoEm: agora, geradoPor: A.user.usuario, geradoPorNome: A.user.nome };
         ops.push({ s: 'mops', op: 'put', v: mop }); novas.push(mop);
-        for (const it of mop.itens) { const f = A.data.ferias.find((x) => x.id === it.feriasId); ops.push({ s: 'ferias', op: 'put', v: { ...f, status: 'mop', mopId: mop.id } }); }
+        for (const r of regs) ops.push({ s: 'ferias', op: 'put', v: { ...r, status: 'mop', mopId: mop.id } });
       }
       await A.commit(ops, { tipo: 'mop', resumo: `MOP de férias gerada(s): ${novas.map((n) => n.num).join(', ')}`, reversivel: true });
-      A.ui.ferias.sel.clear(); A.ui.ferias.tab = 'mops'; A.render(); A.toast(`${novas.length} MOP gerada(s).`);
+      A.ui.ferias.sel.clear(); A.ui.ferias.tab = 'mops'; A.render(); A.toast(`${novas.length} MOP gerada(s). Aguardando a aprovação do gestor.`);
       abrirMop(novas[0].id);
     } }] : [])] });
   }
@@ -2787,30 +3036,62 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   async function marcarEnviada(m, para, cc) {
     const ops = [{ s: 'mops', op: 'put', v: { ...m, status: 'enviada', enviadoEm: new Date().toISOString(), enviadoPor: A.user.usuario, emailPara: para, emailCc: cc } }];
     for (const it of m.itens) { const f = A.data.ferias.find((x) => x.id === it.feriasId); if (f && f.status !== 'cancelada') ops.push({ s: 'ferias', op: 'put', v: { ...f, status: 'enviada' } }); }
-    await A.commit(ops, { tipo: 'mop', resumo: `${m.num} marcada como enviada a ${m.gestorNome}`, reversivel: true }); A.toast('MOP registrada como enviada.'); A.render();
+    await A.commit(ops, { tipo: 'mop', resumo: `${m.num} enviada para formalizar as férias de ${C.mopColabNome(m)}`, reversivel: true }); A.toast('MOP registrada como enviada.'); A.render();
   }
+  /** E-mail para formalizar as férias: só depois da aprovação do gestor. Destino: RH/DP das configurações (ou, sem isso, o gestor); gestor e colaborador em cópia. */
   async function prepararEmail(m) {
-    const g = A.gestor(m.gestorId); const para = [C.normEmail((g && g.email) || m.gestorEmail)].filter(Boolean);
-    if (!para.length || !C.emailValido(para[0])) { A.toast('O gestor não tem e-mail válido no cadastro. Corrija em Colaboradores > Gestores.', 'err'); return; }
-    const t = E.Mail.modeloMop(); const cc = new Set(t.cc.map(C.normEmail));
+    const st = C.statusMop(m);
+    if (st !== 'aprovada' && st !== 'enviada') { A.toast('O e-mail só é liberado depois que o gestor aprova a MOP.', 'warn'); return; }
+    const g = A.gestor(m.gestorId); const t = E.Mail.modeloMop();
+    const emGestor = C.normEmail((g && g.email) || m.gestorEmail); const gestorOk = !!emGestor && C.emailValido(emGestor);
+    const para = (t.para || []).map(C.normEmail).filter((e) => e && C.emailValido(e));
+    if (!para.length) { if (!gestorOk) { A.toast('O gestor não tem e-mail válido no cadastro. Corrija em Colaboradores.', 'err'); return; } para.push(emGestor); }
+    const cc = new Set((t.cc || []).map(C.normEmail)); if (gestorOk) cc.add(emGestor);
     if (t.copiarColabs) for (const i of m.itens) { const c = A.colab(i.colabId); const e = C.normEmail((c && c.email) || i.email); if (e && C.emailValido(e)) cc.add(e); }
+    if (t.copiarAnalista3 !== false) for (const i of m.itens) for (const a of A.analistas3(A.colab(i.colabId))) { const e = C.normEmail(a.email); if (e && C.emailValido(e)) cc.add(e); }
     para.forEach((p) => cc.delete(p));
-    const primeiro = String((g && g.nome) || m.gestorNome).split(' ')[0];
-    const vars = { gestor: m.gestorNome, gestorPrimeiro: primeiro, mes: C.mesRotulo(m.mes), ano: m.ano, qtd: m.itens.length, lista: textoLista(m), remetente: A.user.nome, numero: m.num };
+    const primeiro = String((g && g.nome) || m.gestorNome).split(' ')[0]; const colabNome = C.mopColabNome(m);
+    const vars = { gestor: m.gestorNome, gestorPrimeiro: primeiro, colaborador: colabNome, colaboradorPrimeiro: colabNome.split(' ')[0], mes: C.mesRotulo(m.mes), ano: m.ano, qtd: m.itens.length, lista: textoLista(m), remetente: A.user.nome, numero: m.num };
     let bytes; try { bytes = await E.Mop.xlsx(m); } catch (e) { A.toast('Não foi possível gerar a planilha: ' + e.message, 'err'); return; }
-    E.Mail.preparar({ titulo: `E-mail da ${m.num} ao gestor`, arquivo: E.Mop.nomeArquivo(m).replace('.xlsx', ''), para, cc: [...cc], assunto: C.preenche(t.assunto, vars), texto: C.preenche(t.corpo, vars),
+    E.Mail.preparar({ titulo: `E-mail da ${m.num} — formalizar as férias`, arquivo: E.Mop.nomeArquivo(m).replace('.xlsx', ''), para, cc: [...cc], assunto: C.preenche(t.assunto, vars), texto: C.preenche(t.corpo, vars),
       anexos: [{ nome: E.Mop.nomeArquivo(m), tipo: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', bytes }], rotuloEnviado: 'Registrar envio da MOP?',
-      onEnviado: podeMop(m) ? () => marcarEnviada(m, para, [...cc]) : null });
+      onEnviado: st === 'aprovada' && podeMop(m) ? () => marcarEnviada(m, para, [...cc]) : null });
+  }
+  async function decidir(m, status, motivo) {
+    const dec = { por: A.user.usuario, porNome: A.user.nome, em: new Date().toISOString(), motivo: motivo || '' };
+    await A.commit([{ s: 'mops', op: 'put', v: { ...m, status, decisao: dec } }], { tipo: 'mop', resumo: `${m.num} ${status === 'aprovada' ? 'aprovada' : 'reprovada'} por ${A.user.nome}`, reversivel: true });
+    A.toast(status === 'aprovada' ? 'MOP aprovada. O colaborador já pode enviar o e-mail.' : 'MOP reprovada.'); A.render(); abrirMop(m.id);
+  }
+  function pedirMotivo(m) {
+    A.modal({ titulo: `Reprovar ${m.num}`, size: 'sm', corpo: `<p>Explique o que precisa ser ajustado. O colaborador verá este motivo.</p><label class="f full">Motivo *<textarea id="mMot" rows="4" maxlength="300"></textarea></label>`,
+      botoes: [{ label: 'Voltar' }, { label: 'Reprovar MOP', cls: 'perigo', onClick: async (c) => { const mot = A.$('#mMot', c.el).value.trim(); if (mot.length < 3) { A.toast('Informe o motivo da reprovação.', 'warn'); return false; } await decidir(m, 'reprovada', mot); } }] });
+  }
+  async function cancelarMop(m) {
+    if (!(await A.confirm({ titulo: 'Cancelar a MOP', msg: `Cancelar a <b>${esc(m.num)}</b>? As programações voltam para <b>Programada</b>, para você ajustar e gerar outra MOP.`, ok: 'Cancelar MOP', perigo: true }))) return;
+    const ops = [{ s: 'mops', op: 'put', v: { ...m, status: 'cancelada', canceladaEm: new Date().toISOString(), canceladaPor: A.user.usuario } }];
+    for (const it of m.itens) { const f = A.data.ferias.find((x) => x.id === it.feriasId); if (f && f.status !== 'cancelada' && f.mopId === m.id) { const { mopId, ...resto } = f; ops.push({ s: 'ferias', op: 'put', v: { ...resto, status: 'programada' } }); } }
+    await A.commit(ops, { tipo: 'mop', resumo: `${m.num} cancelada`, reversivel: true }); A.toast('MOP cancelada. As férias voltaram para Programada.'); A.ui.ferias.tab = 'prog'; A.render();
   }
   function abrirMop(id) {
     const m = A.data.mops.find((x) => x.id === id); if (!m) return;
-    A.modal({ titulo: `${m.num} — MOP de férias`, size: 'xl', corpo: `
-      <div class="mopmeta"><div><span class="muted small">Gestão</span><b>${esc(m.gestorNome)}</b></div><div><span class="muted small">E-mail do gestor</span><b>${esc((A.gestor(m.gestorId) || {}).email || m.gestorEmail)}</b></div><div><span class="muted small">Competência</span><b>${C.mesRotulo(m.mes)}/${m.ano}</b></div><div><span class="muted small">Colaboradores</span><b>${m.itens.length}</b></div><div><span class="muted small">Situação</span>${m.status === 'enviada' ? `<span class="pill ok">Enviada ${esc(U.fmtBR((m.enviadoEm || '').slice(0, 10)))}</span>` : '<span class="pill warn">Gerada — falta enviar</span>'}</div></div>
-      <div class="mopprev">${E.Mop.html(m)}</div>`,
-    botoes: [{ label: 'Fechar' },
+    const st = C.statusMop(m); const dec = m.decisao || {}; const colabNome = C.mopColabNome(m); const dono = podeMop(m); const decide = podeDecidir(m);
+    const quando = (iso) => (iso ? U.fmtBR(String(iso).slice(0, 10)) : '');
+    const faixa = st === 'aguardando' ? `<div class="alert warn">${A.icon('info')}<div>Aguardando a aprovação de <b>${esc(m.gestorNome)}</b>. Depois de aprovada, ${esc(colabNome.split(' ')[0])} envia a MOP por e-mail para formalizar as férias.</div></div>`
+      : st === 'aprovada' ? `<div class="alert ok">${A.icon('check')}<div>Aprovada por <b>${esc(dec.porNome || m.gestorNome)}</b>${dec.em ? ' em ' + quando(dec.em) : ''}. Agora o e-mail para formalizar as férias está liberado.</div></div>`
+      : st === 'reprovada' ? `<div class="alert err">${A.icon('warn')}<div>Reprovada por <b>${esc(dec.porNome || m.gestorNome)}</b>${dec.em ? ' em ' + quando(dec.em) : ''}.${dec.motivo ? ` Motivo: <i>${esc(dec.motivo)}</i>.` : ''} Cancele esta MOP, ajuste a programação e gere outra.</div></div>`
+      : st === 'enviada' ? `<div class="alert ok">${A.icon('check')}<div>Enviada em ${quando(m.enviadoEm)} para formalizar as férias.</div></div>` : `<div class="alert info">${A.icon('info')}<div>MOP cancelada.</div></div>`;
+    const botoes = [{ label: 'Fechar' },
       { label: `${A.icon('print')} Imprimir / PDF`, onClick: () => { E.Mop.imprimir(m); return false; } },
-      { label: `${A.icon('download')} Baixar planilha (.xlsx)`, onClick: async () => { try { A.download(E.Mop.nomeArquivo(m), await E.Mop.xlsx(m), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); } catch (e) { A.toast(e.message, 'err'); } return false; } },
-      { label: `${A.icon('event')} Preparar e-mail ao gestor`, cls: 'pri', onClick: async () => { await prepararEmail(m); return false; } }] });
+      { label: `${A.icon('download')} Baixar planilha (.xlsx)`, onClick: async () => { try { A.download(E.Mop.nomeArquivo(m), await E.Mop.xlsx(m), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); } catch (e) { A.toast(e.message, 'err'); } return false; } }];
+    if (dono && (st === 'aguardando' || st === 'reprovada' || st === 'aprovada')) botoes.push({ label: 'Cancelar MOP', cls: 'perigo', onClick: async () => { await cancelarMop(m); } });
+    if (decide && st !== 'enviada' && st !== 'cancelada') {
+      if (st !== 'reprovada') botoes.push({ label: 'Reprovar', cls: 'perigo', onClick: () => { pedirMotivo(m); } });
+      if (st !== 'aprovada') botoes.push({ label: `${A.icon('check')} Aprovar MOP`, cls: 'pri', onClick: async () => { if (!(await A.confirm({ titulo: 'Aprovar MOP', msg: `Aprovar a <b>${esc(m.num)}</b> de <b>${esc(colabNome)}</b>? Depois disso o colaborador poderá enviar o e-mail para formalizar as férias.`, ok: 'Aprovar' }))) return false; await decidir(m, 'aprovada', ''); } });
+    }
+    if (dono && (st === 'aprovada' || st === 'enviada')) botoes.push({ label: `${A.icon('event')} ${st === 'enviada' ? 'Reenviar e-mail' : 'Preparar e-mail para formalizar'}`, cls: 'pri', onClick: async () => { await prepararEmail(m); return false; } });
+    A.modal({ titulo: `${m.num} — MOP de férias`, size: 'xl', corpo: `${faixa}
+      <div class="mopmeta"><div><span class="muted small">Colaborador</span><b>${esc(colabNome)}</b></div><div><span class="muted small">Gestão (aprova)</span><b>${esc(m.gestorNome)}</b></div><div><span class="muted small">Competência</span><b>${C.mesRotulo(m.mes)}/${m.ano}</b></div><div><span class="muted small">Períodos</span><b>${m.itens.length}</b></div><div><span class="muted small">Situação</span>${stMop(m)}</div></div>
+      <div class="mopprev">${E.Mop.html(m)}</div>`, botoes });
   }
   A.abrirMop = abrirMop;
 
@@ -2818,7 +3099,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   A.views.ferias = {
     render(c) {
       const f = A.ui.ferias; const ed = podeAlgo(); const hoje = U.todayIso();
-      const tabs = [['prog', 'Programação de férias'], ['mops', 'MOPs geradas']];
+      const nAp = aguardandoMim().length; const tabs = [['prog', 'Programação de férias'], ['mops', `MOPs geradas${nAp ? ` (${nAp} p/ aprovar)` : ''}`]];
       const todas = A.data.ferias.filter((x) => A.passaFiltro(A.colab(x.colabId)));
       const emFerias = todas.filter((x) => x.status !== 'cancelada' && x.inicio <= hoje && x.fim >= hoje).length;
       const prox = todas.filter((x) => x.status !== 'cancelada' && x.inicio > hoje && U.diffDays(hoje, x.inicio) <= 60).length;
@@ -2834,7 +3115,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       t.innerHTML = `<div class="toolbar"><input type="search" id="q" placeholder="Pesquisar colaborador…" value="${esc(f.busca)}"><select id="st" aria-label="Situação"><option value="">Todas as situações</option>${Object.entries(ST).map(([k, v]) => `<option value="${k}" ${f.status === k ? 'selected' : ''}>${v[0]}</option>`).join('')}</select><span class="sp"></span>
           ${ed ? `<button class="btn" id="gMop" ${f.sel.size ? '' : 'disabled'}>${A.icon('print')} Gerar MOP (${f.sel.size})</button><button class="btn pri" id="novo">${A.icon('plus')} Programar férias</button>` : ''}</div>
         <div class="help">Programe as férias de cada colaborador, marque as programações que vão juntas e clique em <b>Gerar MOP</b>. O sistema monta o formulário FRC-016 igual ao modelo da empresa (uma MOP por gestor) e prepara o e-mail para o gestor com o anexo, usando os e-mails do cadastro.</div>
-        <div class="tablewrap"><table class="t"><thead><tr><th style="width:34px"></th><th>Colaborador</th><th>Gestão</th><th>Início</th><th>Último dia</th><th>Dias</th><th>Abono</th><th>13º</th><th>Situação</th><th></th></tr></thead><tbody>${lista.map((x) => { const col = A.colab(x.colabId) || { nome: '(removido)' }; const fa = col.id ? C.faltando(col, A.cargos()) : []; return `<tr><td>${podeColab(x.colabId) && x.status === 'programada' ? `<input type="checkbox" data-s="${x.id}" ${f.sel.has(x.id) ? 'checked' : ''} aria-label="Selecionar">` : ''}</td><td><b>${esc(col.nome)}</b>${fa.length ? ` <span class="pill warn" title="Falta: ${esc(fa.map((k) => C.ROTULOS[k]).join(', '))}">cadastro incompleto</span>` : ''}</td><td>${esc(A.gestorNome(col.gestorId)) || '<span class="muted">—</span>'}</td><td>${U.fmtBR(x.inicio)}</td><td>${U.fmtBR(x.fim)}</td><td>${x.dias}</td><td>${esc(x.abono)}</td><td>${esc(x.adiant13)}</td><td>${stPill(x.status)}</td><td style="white-space:nowrap">${x.mopId ? `<button class="btn sm" data-m="${x.mopId}">Ver MOP</button> ` : ''}${podeColab(x.colabId) && x.status === 'programada' ? `<button class="btn sm" data-e="${x.id}">${A.icon('edit')} Editar</button> ` : ''}${podeColab(x.colabId) && x.status !== 'cancelada' ? `<button class="btn sm perigo" data-c="${x.id}">Cancelar</button>` : ''}</td></tr>`; }).join('') || '<tr><td colspan="10" class="empty">Nenhuma programação de férias encontrada.</td></tr>'}</tbody></table></div>`;
+        <div class="tablewrap"><table class="t"><thead><tr><th style="width:34px"></th><th>Colaborador</th><th>Gestão</th><th>Início</th><th>Último dia</th><th>Dias</th><th>Abono</th><th>13º</th><th>Situação</th><th></th></tr></thead><tbody>${lista.map((x) => { const col = A.colab(x.colabId) || { nome: '(removido)' }; const fa = col.id ? C.faltando(col, A.cargos()) : []; return `<tr><td>${podeColab(x.colabId) && x.status === 'programada' ? `<input type="checkbox" data-s="${x.id}" ${f.sel.has(x.id) ? 'checked' : ''} aria-label="Selecionar">` : ''}</td><td><b>${esc(col.nome)}</b>${fa.length ? ` <span class="pill warn" title="Falta: ${esc(fa.map((k) => C.ROTULOS[k]).join(', '))}">cadastro incompleto</span>` : ''}</td><td>${esc(A.gestorNome(col.gestorId)) || '<span class="muted">—</span>'}</td><td>${U.fmtBR(x.inicio)}</td><td>${U.fmtBR(x.fim)}</td><td>${x.dias}</td><td>${esc(x.abono)}</td><td>${esc(x.adiant13)}</td><td>${x.mopId && A.data.mops.find((y) => y.id === x.mopId) && x.status !== 'enviada' ? stMop(A.data.mops.find((y) => y.id === x.mopId)) : stPill(x.status)}</td><td style="white-space:nowrap">${x.mopId ? `<button class="btn sm" data-m="${x.mopId}">Ver MOP</button> ` : ''}${podeColab(x.colabId) && x.status === 'programada' ? `<button class="btn sm" data-e="${x.id}">${A.icon('edit')} Editar</button> ` : ''}${podeColab(x.colabId) && x.status !== 'cancelada' ? `<button class="btn sm perigo" data-c="${x.id}">Cancelar</button>` : ''}</td></tr>`; }).join('') || '<tr><td colspan="10" class="empty">Nenhuma programação de férias encontrada.</td></tr>'}</tbody></table></div>`;
       A.$('#q', t).oninput = (e) => { f.busca = e.target.value; const p = e.target.selectionStart; this.render(c); const q = A.$('#q', c); q.focus(); q.setSelectionRange(p, p); };
       A.$('#st', t).onchange = (e) => { f.status = e.target.value; this.render(c); };
       if (A.$('#novo', t)) A.$('#novo', t).onclick = () => abrirForm(null);
@@ -2846,9 +3127,11 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     }
   };
   function tabMops(t) {
-    const lista = A.data.mops.filter((m) => !A.filtroAtivo() || m.itens.some((i) => A.passaFiltro(A.colab(i.colabId)))).sort((a, b) => b.geradoEm.localeCompare(a.geradoEm));
-    t.innerHTML = `<div class="help">Histórico das MOPs geradas. Cada MOP guarda uma cópia dos dados no momento da geração; dá para reabrir, baixar, imprimir e reenviar quando quiser.</div>
-      <div class="tablewrap"><table class="t"><thead><tr><th>Número</th><th>Competência</th><th>Gestão</th><th>Colaboradores</th><th>Gerada em</th><th>Por</th><th>Situação</th><th></th></tr></thead><tbody>${lista.map((m) => `<tr><td><b>${esc(m.num)}</b></td><td>${C.mesRotulo(m.mes)}/${m.ano}</td><td>${esc(m.gestorNome)}</td><td class="small">${m.itens.map((i) => esc(i.nome.split(' ')[0])).join(', ')}</td><td>${U.fmtBR(m.geradoEm.slice(0, 10))}</td><td>${esc(m.geradoPorNome || m.geradoPor)}</td><td>${m.status === 'enviada' ? `<span class="pill ok">Enviada ${U.fmtBR((m.enviadoEm || '').slice(0, 10))}</span>` : '<span class="pill warn">Falta enviar</span>'}</td><td><button class="btn sm" data-m="${m.id}">Abrir</button></td></tr>`).join('') || '<tr><td colspan="8" class="empty">Nenhuma MOP gerada ainda.</td></tr>'}</tbody></table></div>`;
+    const pend = aguardandoMim();
+    const lista = A.data.mops.filter((m) => !A.filtroAtivo() || m.itens.some((i) => A.passaFiltro(A.colab(i.colabId)))).sort((a, b) => (pend.includes(b) - pend.includes(a)) || b.geradoEm.localeCompare(a.geradoEm));
+    t.innerHTML = `${pend.length ? `<div class="alert warn">${A.icon('warn')}<div><b>${pend.length} MOP(s) aguardando a sua aprovação.</b> Clique em <b>Analisar</b> para aprovar ou reprovar.</div></div>` : ''}
+      <div class="help">Fluxo: o colaborador gera a MOP → o <b>gestor aprova ou reprova</b> → com a aprovação, o colaborador envia o e-mail para formalizar as férias. Cada MOP guarda uma cópia dos dados do momento da geração.</div>
+      <div class="tablewrap"><table class="t"><thead><tr><th>Número</th><th>Competência</th><th>Colaborador</th><th>Gestão</th><th>Períodos</th><th>Gerada em</th><th>Situação</th><th></th></tr></thead><tbody>${lista.map((m) => `<tr><td><b>${esc(m.num)}</b></td><td>${C.mesRotulo(m.mes)}/${m.ano}</td><td>${esc(C.mopColabNome(m))}</td><td>${esc(m.gestorNome)}</td><td class="small">${m.itens.map((i) => `${U.fmtBR(i.inicio)} (${i.dias}d)`).join('<br>')}</td><td>${U.fmtBR(m.geradoEm.slice(0, 10))}</td><td>${stMop(m)}${C.statusMop(m) === 'enviada' && m.enviadoEm ? ` <span class="small muted">${U.fmtBR(m.enviadoEm.slice(0, 10))}</span>` : ''}</td><td><button class="btn sm ${pend.includes(m) ? 'pri' : ''}" data-m="${m.id}">${pend.includes(m) ? 'Analisar' : 'Abrir'}</button></td></tr>`).join('') || '<tr><td colspan="8" class="empty">Nenhuma MOP gerada ainda.</td></tr>'}</tbody></table></div>`;
     A.$$('[data-m]', t).forEach((b) => b.onclick = () => abrirMop(b.dataset.m));
   }
 })(window);
@@ -2864,6 +3147,90 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   /** Avisos de evento pendentes (7 dias e véspera) para os gerentes; só quem edita prepara os e-mails. */
   const pendentes = () => (A.can('edicao') && A.data.colaboradores ? E.Cad.avisosEvento(A.data.eventos, A.data.colaboradores, A.cargos(), U.todayIso()) : []);
   A.pendEmails = () => pendentes().length;
+
+  /* ---------- prazo máximo para tirar férias (vem da planilha da folha) ---------- */
+  const Pz = E.Prazos; const C = E.Cad;
+  const TIPO_PRAZO = 'Prazo de férias';
+  const titulo = (n) => String(n || '').toLowerCase().replace(/(^|\s)(\S)/g, (m, a, b) => a + b.toUpperCase()).replace(/ (D[aeo]s?|E) /g, (m) => m.toLowerCase());
+  const nomeDe = (p) => (A.colab(p.colabId) || {}).nome || titulo(p.nome);
+  /** Férias já programadas no painel (próprias, ou as MOPs que o gestor enxerga) para saber se o prazo já está coberto. */
+  const cobre = (colabId) => {
+    const out = []; const ids = new Set();
+    for (const f of A.data.ferias || []) if (f.colabId === colabId && f.status !== 'cancelada') { out.push({ inicio: f.inicio, fim: f.fim, dias: f.dias, abono: f.abono }); ids.add(f.id); }
+    for (const m of A.data.mops || []) if (!['cancelada', 'reprovada'].includes(C.statusMop(m))) for (const i of m.itens || []) if (i.colabId === colabId && !ids.has(i.feriasId)) out.push({ inicio: i.inicio, fim: i.fim, dias: i.dias, abono: i.abono });
+    return out;
+  };
+  A.prazosFerias = () => (A.data && A.data.prazos ? Pz.situacoes(A.data.prazos, { hoje: U.todayIso(), avisoDias: Number(A.cfg('prazoFeriasDias', 90)), cobre }) : []);
+  A.pendPrazos = () => A.prazosFerias().filter((p) => p.alerta).length;
+  const pillPrazo = (p) => `<span class="pill ${Pz.ROTULO[p.status][1]}">${Pz.ROTULO[p.status][0]}</span>`;
+  const periodoTxt = (p) => (p.periodoIni ? `${U.fmtBR(p.periodoIni)} a ${U.fmtBR(p.periodoFim)}` : '—');
+  function detalhePrazo(p) {
+    A.modal({ titulo: 'Prazo máximo para tirar férias', size: 'sm', corpo: `<div class="mopmeta" style="flex-direction:column;gap:8px">
+      <div><span class="muted small">Colaborador</span><b>${esc(nomeDe(p))}</b></div><div><span class="muted small">Matrícula</span><b>${esc(p.matricula)}</b></div>
+      <div><span class="muted small">Período aquisitivo</span><b>${esc(periodoTxt(p))}</b></div><div><span class="muted small">Dias a gozar</span><b>${p.vencidas}</b></div>
+      <div><span class="muted small">Limite ideal</span><b>${U.fmtBR(p.limiteIdeal)}</b></div><div><span class="muted small">Limite máximo (início das férias)</span><b>${U.fmtBR(p.limiteMax)}</b> <span class="small">${esc(Pz.faltamTexto(p.faltam))}</span></div>
+      <div><span class="muted small">Situação</span>${pillPrazo(p)}${p.progIni ? ` <span class="small">folha: ${U.fmtBR(p.progIni)} a ${U.fmtBR(p.progFim)}</span>` : ''}</div></div>
+      <p class="small muted" style="margin-top:10px">Passado o limite máximo as férias vencem em dobro. Programe o período em <b>Férias</b> antes dessa data.</p>`,
+    botoes: [{ label: 'Fechar' }, ...(A.user && (A.can('edicao') || A.meuColab()) ? [{ label: 'Programar férias', cls: 'pri', onClick: () => { A.go('ferias'); } }] : [])] });
+  }
+  function cartaoPrazos() {
+    const ed = A.can('edicao'); const todas = A.prazosFerias().filter((p) => !A.filtroAtivo() || A.passaFiltro(A.colab(p.colabId)));
+    if (!todas.length && !ed) return '';
+    const al = todas.filter((p) => p.alerta); const eu = A.meuColab();
+    const meus = al.filter((p) => eu && p.colabId === eu);
+    const banner = meus.length ? `<div class="alert ${meus.some((p) => p.status !== 'atencao') ? 'err' : 'warn'}">${A.icon('warn')}<div><b>Seu prazo para tirar férias:</b> até <b>${U.fmtBR(meus[0].limiteMax)}</b> (${esc(Pz.faltamTexto(meus[0].faltam))}). Programe em <b>Férias</b>.</div></div>` : '';
+    const outros = al.filter((p) => !(eu && p.colabId === eu));
+    const banner2 = outros.length ? `<div class="alert ${outros.some((p) => p.status !== 'atencao') ? 'err' : 'warn'}">${A.icon('warn')}<div><b>${outros.length} prazo(s) de férias</b> ${ed ? '' : 'da sua equipe '}vencidos ou chegando perto do limite.</div></div>` : '';
+    return `<div class="card" style="margin-bottom:14px"><div class="toolbar" style="margin:0 0 8px"><h2 style="margin:0">Prazo máximo para tirar férias</h2><span class="sp"></span>${ed ? `<button class="btn" id="bPrz">${A.icon('upload')} Importar prazos (planilha da folha)</button>` : ''}</div>
+      <p class="muted small" style="margin:0 0 10px">Vem da planilha da folha (limite máximo para <b>iniciar</b> as férias). Aparece no calendário para o colaborador e para o gestor, com alerta a partir de ${Number(A.cfg('prazoFeriasDias', 90))} dias antes do vencimento.</p>
+      ${banner}${banner2}
+      ${todas.length ? `<div class="tablewrap" style="max-height:300px"><table class="t"><thead><tr><th>Colaborador</th><th>Período aquisitivo</th><th>Dias a gozar</th><th>Limite ideal</th><th>Limite máximo</th><th>Situação</th></tr></thead><tbody>${todas.slice().sort((a, b) => (b.alerta - a.alerta) || (a.limiteMax < b.limiteMax ? -1 : 1)).map((p) => `<tr data-pz="${p.id}" style="cursor:pointer"><td><b>${esc(nomeDe(p))}</b></td><td>${esc(periodoTxt(p))}</td><td>${p.vencidas}</td><td>${U.fmtBR(p.limiteIdeal)}</td><td><b>${U.fmtBR(p.limiteMax)}</b> <span class="small muted">${esc(Pz.faltamTexto(p.faltam))}</span></td><td>${pillPrazo(p)}</td></tr>`).join('')}</tbody></table></div>` : `<div class="muted small">Nenhum prazo importado ainda. Use <b>Importar prazos</b> com a planilha “Cabeçalho de Férias” da folha.</div>`}</div>`;
+  }
+  async function lerLinhasFolha(buf) {
+    const wb = new root.ExcelJS.Workbook(); await wb.xlsx.load(buf);
+    const ws = wb.worksheets.find((w) => /f[eé]rias/i.test(w.name)) || wb.worksheets[0]; if (!ws) throw new Error('A planilha está vazia.');
+    const linhas = []; ws.eachRow({ includeEmpty: false }, (row, n) => { const a = []; row.eachCell({ includeEmpty: true }, (c, i) => { a[i - 1] = c.value; }); linhas[n - 1] = a; });
+    return linhas;
+  }
+  async function importarPrazos() {
+    if (!root.ExcelJS) { A.toast('Biblioteca de planilhas indisponível.', 'err'); return; }
+    let plano = null;
+    const m = A.modal({ titulo: 'Importar prazos de férias', size: 'xl', corpo: `<div class="help">Envie a planilha <b>“Cabeçalho de Férias”</b> da folha. Cada pessoa é ligada ao cadastro pela <b>matrícula</b> (e o nome é conferido); se a matrícula ainda não estiver no cadastro, pelo <b>nome completo</b>. Quem não está no cadastro é <b>ignorado</b>: cadastre e importe de novo. Nada é gravado antes de você confirmar.</div>
+      <label class="f full">Arquivo .xlsx<input type="file" id="pArq" accept=".xlsx"></label><div id="pOut"></div>`,
+    botoes: [{ label: 'Cancelar' }, { label: 'Importar prazos', cls: 'pri', id: 'pOk', disabled: true, onClick: async (c) => {
+      const marcados = plano.ligados.filter((l, i) => A.$(`[data-i="${i}"]`, c.el) && A.$(`[data-i="${i}"]`, c.el).checked); if (!marcados.length) { A.toast('Marque ao menos uma pessoa.', 'warn'); return false; }
+      const agora = new Date().toISOString(); const ops = []; const preencher = A.$('#pFill', c.el).checked; let nPrazos = 0, nCad = 0;
+      for (const l of marcados) {
+        const regs = l.periodos.map((p) => Pz.registro(l.colab, p, agora, A.user.usuario)); const novos = new Set(regs.map((r) => r.id));
+        for (const r of regs) ops.push({ s: 'prazos', op: 'put', v: r }); nPrazos += regs.length;
+        for (const ex of A.data.prazos || []) if (ex.colabId === l.colab.id && !novos.has(ex.id)) ops.push({ s: 'prazos', op: 'delete', k: ex.id });
+        if (preencher) {
+          const p0 = l.periodos[0]; const patch = {};
+          if (!String(l.colab.matricula || '').trim() && p0.matricula) patch.matricula = p0.matricula;
+          if (!l.colab.admissao && p0.admissao) patch.admissao = p0.admissao;
+          if (!String(l.colab.centroCusto || '').trim() && p0.centroCusto) patch.centroCusto = p0.centroCusto;
+          if (Object.keys(patch).length) { ops.push({ s: 'colaboradores', op: 'put', v: { ...l.colab, ...patch } }); nCad++; }
+        }
+      }
+      await A.commit(ops, { tipo: 'cadastro', resumo: `Prazos de férias importados: ${marcados.length} pessoa(s), ${nPrazos} período(s)`, reversivel: true });
+      A.toast(`Prazos importados: ${marcados.length} pessoa(s)${nCad ? `; ${nCad} cadastro(s) completado(s)` : ''}.`); A.refreshBell && A.refreshBell(); A.render();
+    } }] });
+    A.$('#pArq', m.el).onchange = async (e) => {
+      const out = A.$('#pOut', m.el); const f = e.target.files[0]; if (!f) return; out.innerHTML = '<p class="muted">Lendo…</p>';
+      try {
+        const r = Pz.parse(await lerLinhasFolha(await f.arrayBuffer())); if (r.erro) throw new Error(r.erro);
+        plano = Pz.vincula(r.periodos, A.data.colaboradores); const pessoas = plano.ligados.length + plano.ignorados.length + plano.ambiguos.length + plano.conflitos.length;
+        const naoNaPlanilha = A.data.colaboradores.filter((c) => c.situacao !== 'inativo' && !plano.ligados.some((l) => l.colab.id === c.id));
+        const proximo = (l) => { const h = Pz.situacoes(l.periodos.map((p) => ({ ...p, colabId: l.colab.id })), { hoje: U.todayIso() }).filter((x) => x.status !== 'programado'); return h[0]; };
+        out.innerHTML = `<div class="alert ${plano.ligados.length ? 'info' : 'warn'}">${A.icon('info')}<div><b>${r.periodos.length}</b> linha(s) de ${pessoas} pessoa(s) na planilha. <b>${plano.ligados.length}</b> ligada(s) ao cadastro (${plano.ligados.filter((l) => l.metodo === 'matricula').length} por matrícula, ${plano.ligados.filter((l) => l.metodo === 'nome').length} por nome); <b>${plano.ignorados.length}</b> não estão no cadastro (ignoradas).${plano.conflitos.length + plano.ambiguos.length ? ` <b>${plano.conflitos.length + plano.ambiguos.length}</b> exigem conferência (veja abaixo).` : ''}</div></div>
+          ${plano.ligados.length ? `<div class="tablewrap" style="max-height:300px"><table class="t"><thead><tr><th></th><th>Cadastro</th><th>Nome na planilha</th><th>Matrícula</th><th>Vínculo</th><th>Próximo limite máximo</th></tr></thead><tbody>${plano.ligados.map((l, i) => { const x = proximo(l); return `<tr><td><input type="checkbox" data-i="${i}" ${l.confere ? 'checked' : ''} aria-label="Importar"></td><td><b>${esc(l.colab.nome)}</b></td><td>${esc(titulo(l.nomeArquivo))}</td><td>${esc(l.matricula)}</td><td>${l.metodo === 'matricula' ? 'Matrícula' : 'Nome'}${l.confere ? '' : ' <span class="pill warn" title="A matrícula bate, mas o nome é diferente. Confira antes de importar.">conferir nome</span>'}</td><td>${x ? `${U.fmtBR(x.limiteMax)} <span class="small muted">(${esc(Pz.faltamTexto(x.faltam))})</span>` : '<span class="muted">sem férias a gozar</span>'}</td></tr>`; }).join('')}</tbody></table></div>
+          <label class="f full chk" style="margin-top:8px"><input type="checkbox" id="pFill" checked> Completar no cadastro o que estiver em branco (matrícula, admissão e centro de custo) com os dados da planilha</label>` : '<input type="checkbox" id="pFill" hidden>'}
+          ${plano.conflitos.length || plano.ambiguos.length ? `<div class="alert warn" style="margin-top:8px">${A.icon('warn')}<div><b>Não ligadas (confira o cadastro):</b><ul class="lista">${[...plano.conflitos, ...plano.ambiguos].map((x) => `<li>${esc(titulo(x.nome))} (${esc(x.matricula)}): ${esc(x.motivo)}</li>`).join('')}</ul></div></div>` : ''}
+          ${naoNaPlanilha.length ? `<p class="small muted" style="margin-top:8px">No cadastro e sem linha na planilha: ${esc(naoNaPlanilha.map((c) => c.nome.split(' ')[0]).join(', '))}.</p>` : ''}`;
+        const ok = A.$('[data-id="pOk"]', m.el) || A.$$('footer .btn', m.el).find((b) => b.dataset.id === 'pOk'); if (ok) ok.disabled = !plano.ligados.length;
+      } catch (err) { plano = null; out.innerHTML = `<div class="alert err">${A.icon('warn')}<div>${esc(err.message)}</div></div>`; }
+    };
+  }
   function cartaoAvisos() {
     if (!A.can('edicao')) return '';
     const g = pendentes(); const nGer = (A.data.gestores || []).filter((x) => x.gerente && x.ativo !== false).length;
@@ -2926,24 +3293,28 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       const evs = A.data.eventos.filter((e) => (!f.tipo || e.tipo === f.tipo) && (!f.colabId || e.colabId === f.colabId) && (!f.sit || e.situacao === f.sit) && (!A.filtroAtivo() || !e.colabId || A.passaFiltro(A.colab(e.colabId))));
       const anivs = (!f.tipo || f.tipo === 'Aniversário') && !f.sit ? A.visiveis().filter((x) => x.situacao !== 'inativo' && x.aniversario && (!f.colabId || x.id === f.colabId)) : [];
       const doDia = (d) => [...anivs.filter((x) => (x.aniversario.length >= 10 ? x.aniversario.slice(5) : x.aniversario) === d.slice(5)).map((x) => ({ aniv: true, nome: x.nome })), ...evs.filter((e) => e.data === d).map((e) => ({ e }))];
+      const prz = (!f.tipo || f.tipo === TIPO_PRAZO) && !f.sit ? A.prazosFerias().filter((p) => !['programado', 'coberto'].includes(p.status) && (!f.colabId || p.colabId === f.colabId) && (!A.filtroAtivo() || A.passaFiltro(A.colab(p.colabId)))) : [];
       const hoje = U.todayIso();
       let cel = U.WEEKDAY_LABEL.map((l) => `<div class="h">${l}</div>`).join('');
       for (let d = ini; d <= fim; d = U.addDays(d, 1)) {
-        cel += `<div class="d ${d.slice(0, 7) !== f.mes ? 'out' : ''} ${d === hoje ? 'today' : ''}" data-d="${d}"><span class="n">${Number(d.slice(8))}</span>${doDia(d).map((x) => x.aniv ? `<span class="ev aniv" title="Aniversário de ${esc(x.nome)}">🎂 ${esc(x.nome.split(' ')[0])}</span>` : `<span class="ev ${x.e.situacao === 'cancelado' ? 'canc' : ''}" data-ev="${x.e.id}" title="${esc(x.e.tipo)}${x.e.colabId && A.colab(x.e.colabId) ? ' · ' + esc(A.colab(x.e.colabId).nome) : ''}">${esc(x.e.inicio ? x.e.inicio + ' ' : '')}${esc(x.e.tipo)}${x.e.colabId && A.colab(x.e.colabId) ? ' · ' + esc(A.colab(x.e.colabId).nome.split(' ')[0]) : ''}</span>`).join('')}</div>`;
+        cel += `<div class="d ${d.slice(0, 7) !== f.mes ? 'out' : ''} ${d === hoje ? 'today' : ''}" data-d="${d}"><span class="n">${Number(d.slice(8))}</span>${prz.filter((p) => p.limiteMax === d).map((p) => `<span class="ev prazo ${Pz.ROTULO[p.status][1]}" data-pz="${p.id}" title="Limite máximo para iniciar férias · ${esc(nomeDe(p))} (${esc(Pz.faltamTexto(p.faltam))})">⏳ Limite férias · ${esc(nomeDe(p).split(' ')[0])}</span>`).join('')}${doDia(d).map((x) => x.aniv ? `<span class="ev aniv" title="Aniversário de ${esc(x.nome)}">🎂 ${esc(x.nome.split(' ')[0])}</span>` : `<span class="ev ${x.e.situacao === 'cancelado' ? 'canc' : ''}" data-ev="${x.e.id}" title="${esc(x.e.tipo)}${x.e.colabId && A.colab(x.e.colabId) ? ' · ' + esc(A.colab(x.e.colabId).nome) : ''}">${esc(x.e.inicio ? x.e.inicio + ' ' : '')}${esc(x.e.tipo)}${x.e.colabId && A.colab(x.e.colabId) ? ' · ' + esc(A.colab(x.e.colabId).nome.split(' ')[0]) : ''}</span>`).join('')}</div>`;
       }
       const lista = evs.filter((e) => e.data >= primeiro && e.data <= ult).sort((a, b) => (a.data + (a.inicio || '')).localeCompare(b.data + (b.inicio || '')));
+      const prMes = prz.filter((p) => p.limiteMax >= primeiro && p.limiteMax <= ult);
       c.innerHTML = `<div class="toolbar"><button class="btn sm" id="pm">${A.icon('left')}</button><b style="min-width:150px;text-align:center">${esc(U.MONTHS[m - 1])} de ${y}</b><button class="btn sm" id="nm">${A.icon('right')}</button>
-        <select id="ft"><option value="">Todos os tipos</option>${TIPOS.map((t) => `<option ${f.tipo === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
+        <select id="ft"><option value="">Todos os tipos</option>${[...TIPOS, TIPO_PRAZO].map((t) => `<option ${f.tipo === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
         <select id="fc"><option value="">Todos os colaboradores</option>${A.visiveis().map((x) => `<option value="${x.id}" ${f.colabId === x.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select>
         <select id="fs"><option value="">Qualquer situação</option><option value="previsto" ${f.sit === 'previsto' ? 'selected' : ''}>Previsto</option><option value="realizado" ${f.sit === 'realizado' ? 'selected' : ''}>Realizado</option><option value="cancelado" ${f.sit === 'cancelado' ? 'selected' : ''}>Cancelado</option></select>
         <span class="sp"></span>${A.user && (!A.limitado() || A.meuColab()) ? `<button class="btn pri" id="nev">${A.icon('plus')} Novo evento</button>` : ''}</div>
-        ${cartaoAvisos()}
+        ${cartaoPrazos()}${cartaoAvisos()}
         <div class="cal">${cel}</div>
-        <div class="card" style="margin-top:14px"><h2>Eventos do mês</h2>${lista.length ? `<div class="tablewrap"><table class="t"><thead><tr><th>Data</th><th>Horário</th><th>Tipo</th><th>Colaborador</th><th>Situação</th><th>Observação</th></tr></thead><tbody>${lista.map((e) => `<tr data-ev="${e.id}" style="cursor:pointer"><td>${U.fmtBR(e.data)}</td><td>${esc(e.inicio || '')}${e.fim ? '–' + esc(e.fim) : ''}</td><td>${esc(e.tipo)}</td><td>${esc((A.colab(e.colabId) || {}).nome || '—')}</td><td><span class="pill ${e.situacao === 'cancelado' ? 'ausente' : e.situacao === 'realizado' ? 'ok' : 'warn'}">${esc(e.situacao)}</span></td><td class="small muted">${esc(e.obs || '')}</td></tr>`).join('')}</tbody></table></div>` : '<div class="muted small">Nenhum evento neste mês. Os aniversários cadastrados aparecem automaticamente no calendário.</div>'}</div>`;
+        <div class="card" style="margin-top:14px"><h2>Eventos do mês</h2>${lista.length || prMes.length ? `<div class="tablewrap"><table class="t"><thead><tr><th>Data</th><th>Horário</th><th>Tipo</th><th>Colaborador</th><th>Situação</th><th>Observação</th></tr></thead><tbody>${lista.map((e) => `<tr data-ev="${e.id}" style="cursor:pointer"><td>${U.fmtBR(e.data)}</td><td>${esc(e.inicio || '')}${e.fim ? '–' + esc(e.fim) : ''}</td><td>${esc(e.tipo)}</td><td>${esc((A.colab(e.colabId) || {}).nome || '—')}</td><td><span class="pill ${e.situacao === 'cancelado' ? 'ausente' : e.situacao === 'realizado' ? 'ok' : 'warn'}">${esc(e.situacao)}</span></td><td class="small muted">${esc(e.obs || '')}</td></tr>`).join('')}${prMes.map((p) => `<tr data-pz="${p.id}" style="cursor:pointer"><td>${U.fmtBR(p.limiteMax)}</td><td></td><td>Prazo máximo de férias</td><td>${esc(nomeDe(p))}</td><td>${pillPrazo(p)}</td><td class="small muted">${p.vencidas} dia(s) a gozar · período aquisitivo ${esc(periodoTxt(p))}</td></tr>`).join('')}</tbody></table></div>` : '<div class="muted small">Nenhum evento neste mês. Os aniversários cadastrados aparecem automaticamente no calendário.</div>'}</div>`;
       const go = (k) => { const dt = U.isoToDate(U.mkIso(y, m, 1)); dt.setUTCMonth(dt.getUTCMonth() + k); f.mes = U.dateToIso(dt).slice(0, 7); this.render(c); };
       A.$('#pm', c).onclick = () => go(-1); A.$('#nm', c).onclick = () => go(1);
       A.$('#ft', c).onchange = (e) => { f.tipo = e.target.value; this.render(c); }; A.$('#fc', c).onchange = (e) => { f.colabId = e.target.value; this.render(c); }; A.$('#fs', c).onchange = (e) => { f.sit = e.target.value; this.render(c); };
       ligaAvisos(c);
+      A.$$('[data-pz]', c).forEach((x) => x.onclick = (e) => { e.stopPropagation(); const p = A.prazosFerias().find((y) => y.id === x.dataset.pz); if (p) detalhePrazo(p); });
+      if (A.$('#bPrz', c)) A.$('#bPrz', c).onclick = importarPrazos;
       if (A.$('#nev', c)) A.$('#nev', c).onclick = () => abrir(null);
       A.$$('.cal .d', c).forEach((d) => d.onclick = (e) => { const ev = e.target.closest('[data-ev]'); if (ev) { abrir(A.data.eventos.find((x) => x.id === ev.dataset.ev)); return; } if (A.user && (!A.limitado() || A.meuColab())) abrir(null, d.dataset.d); });
       A.$$('tr[data-ev]', c).forEach((r) => r.onclick = () => abrir(A.data.eventos.find((x) => x.id === r.dataset.ev)));
@@ -3040,6 +3411,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     <h3>3. Siglas</h3><p>Em <b>Configurações &gt; Siglas</b> você pode criar, renomear, recolorir, trocar a classificação ou excluir qualquer sigla. Ao renomear, a escala já lançada acompanha o novo nome. Ao excluir uma sigla em uso, você escolhe por qual outra substituir (ou apaga os lançamentos).</p>
     <h3>4. Planta</h3><p><b>Disposição padrão</b> vale para todos os dias (a planta se repete automaticamente). <b>Ajuste do dia</b> vale só para a data. Clique numa cadeira para atribuir; arraste uma cadeira ocupada sobre outra para trocar. Quem está em home office ou ausente nunca ocupa a cadeira no dia. <b>Gestores</b> não seguem a escala: aparecem na lista “Gestores” ao lado e sentam em <b>mesas de gestão</b> (azuis, criadas em “Editar layout” › “+ Mesa de gestão”, ou mudando o tipo de uma cadeira). Essas mesas não entram na capacidade nem na ocupação do rodízio.</p>
     <h3>5. Cadastro, cargos, gestores e filtros</h3><p>Cada cadastro tem <b>cargo</b>, matrícula, CPF, e-mail (obrigatório), telefone, gestão e setor. O <b>cargo</b> define o tipo de cadastro: cargos marcados como <b>gestão</b> (botão <b>Cargos</b>; Supervisor, Gerente e Gerente Geral) são os gestores, aparecem na lista de Gestão dos demais, recebem as MOPs e precisam do <b>Código do gestor</b>. O filtro <b>Gestão</b> do topo lista só os <b>gerentes</b> e mostra também as equipes dos supervisores que respondem a eles; a hierarquia é <b>Gerente Geral</b> (cargo máximo, não responde a ninguém) → <b>Gerente</b> (responde ao Gerente Geral, opcional) → <b>Supervisor</b> (responde a um gerente, obrigatório). O <b>e-mail</b> é o que liga o cadastro aos envios: a MOP vai para o gestor e os avisos de alteração vão para o colaborador, sem digitar endereço. Use os filtros <b>Gestão</b> e <b>Setor</b> no topo para ver só uma equipe. A planilha de cadastro pode ser baixada, preenchida e importada.</p><h3>6. Férias e MOP</h3><p>Em <b>Férias</b>, programe o período, marque as programações e clique em <b>Gerar MOP</b>: sai a planilha FRC-016 igual ao modelo (uma por gestor), com pré-visualização, impressão e e-mail pronto para o gestor.</p><h3>7. Avisos</h3><p>O sino no topo mostra aniversários e eventos dos próximos dias (a antecedência é ajustável em Preferências). A Visão geral também lista os próximos.</p>
+    <h3>6. Férias e MOP</h3><p>Em <b>Férias</b>, programe o período e clique em <b>Gerar MOP</b>. Para <b>dividir as férias</b> (30 dias, até 3 períodos), use <b>Adicionar segunda programação</b>: cada período vira uma linha da MOP. A MOP é <b>uma por colaborador</b> e já fica disponível para o <b>gestor</b> (ou um superior), que abre em <b>MOPs geradas</b> e <b>aprova ou reprova</b> (a reprovação pede o motivo). Só depois da aprovação o colaborador usa <b>Preparar e-mail para formalizar</b>. O nome do colaborador vai no assunto e no nome do anexo, e o <b>Analista III do setor</b> dele vai em cópia. Se for reprovada, use <b>Cancelar MOP</b>, ajuste a programação e gere outra.</p>
+    <h3>7. Prazo máximo para tirar férias</h3><p>Em <b>Eventos</b>, quem edita usa <b>Importar prazos</b> com a planilha “Cabeçalho de Férias” da folha. Cada pessoa é ligada ao cadastro pela <b>matrícula</b> (conferindo o nome) ou, se a matrícula ainda não estiver no cadastro, pelo <b>nome completo</b>; quem não está no cadastro é ignorado (cadastre e importe de novo). O <b>limite máximo</b> para iniciar as férias aparece no calendário e na tabela, para o <b>colaborador</b> e para o <b>gestor</b>, com alerta (laranja a partir de 90 dias antes, vermelho com 30 dias ou menos ou vencido) e no sino. Quando as férias são programadas no painel (ou a folha já mostra a programação), o alerta some.</p>
     <h3>8. Backup</h3><p>${E.ONLINE ? 'Os dados ficam no banco online (Supabase). O administrador deve baixar um backup de vez em quando em <b>Backup e dados</b>; antes de restaurar ou apagar tudo, o banco guarda uma cópia de segurança sozinho.' : 'O servidor guarda uma cópia diária automática (últimos 30 dias, na pasta <code>data/backups</code>). O administrador também pode baixar e restaurar um backup em <b>Backup e dados</b>.'}</p></div>`;
 
   A.views.config = {
@@ -3059,16 +3432,19 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   function emails(t) {
     const C = E.Cad; const m = E.Mail.modeloMop();
     t.innerHTML = `<div class="card"><h2>E-mail da MOP de férias</h2>
-      <div class="help">O destinatário é sempre o <b>e-mail do gestor</b> que está no cadastro. Aqui você ajusta o texto e quem recebe cópia. Variáveis disponíveis: <code>{gestor}</code> <code>{gestorPrimeiro}</code> <code>{mes}</code> <code>{ano}</code> <code>{qtd}</code> <code>{lista}</code> <code>{numero}</code> <code>{remetente}</code></div>
-      <div class="form"><label class="f full">Assunto<input id="mAss" value="${esc(m.assunto)}" maxlength="200"></label>
+      <div class="help"><b>Fluxo:</b> o colaborador gera a MOP, o <b>gestor aprova</b> no painel e, só então, o colaborador envia este e-mail para formalizar as férias. Se você informar o <b>destinatário da formalização</b> (RH/DP), o e-mail vai para ele, com o gestor e o colaborador em cópia; se deixar em branco, vai para o <b>e-mail do gestor</b> do cadastro. Variáveis: <code>{colaborador}</code> <code>{colaboradorPrimeiro}</code> <code>{gestor}</code> <code>{gestorPrimeiro}</code> <code>{mes}</code> <code>{ano}</code> <code>{qtd}</code> <code>{lista}</code> <code>{numero}</code> <code>{remetente}</code></div>
+      <div class="form"><label class="f full">Destinatário da formalização, por exemplo RH/DP (separe por vírgula ou espaço; em branco = e-mail do gestor)<input id="mPara" value="${esc((m.para || []).join(', '))}"></label>
+      <label class="f full">Assunto<input id="mAss" value="${esc(m.assunto)}" maxlength="200"></label>
       <label class="f full">Texto do e-mail<textarea id="mCorpo" rows="10">${esc(m.corpo)}</textarea></label>
-      <label class="f full">Cópia fixa (Cc) em toda MOP, por exemplo RH/DP (separe por vírgula ou espaço)<input id="mCc" value="${esc(m.cc.join(', '))}"></label>
-      <label class="f full chk"><input type="checkbox" id="mCol" ${m.copiarColabs ? 'checked' : ''}> Copiar também os colaboradores que constam na MOP (e-mails do cadastro)</label></div>
+      <label class="f full">Cópia fixa (Cc) em toda MOP (separe por vírgula ou espaço)<input id="mCc" value="${esc(m.cc.join(', '))}"></label>
+      <label class="f full chk"><input type="checkbox" id="mCol" ${m.copiarColabs ? 'checked' : ''}> Copiar também o colaborador que consta na MOP (e-mail do cadastro)</label>
+      <label class="f full chk"><input type="checkbox" id="mA3" ${m.copiarAnalista3 !== false ? 'checked' : ''}> Copiar o(s) <b>Analista III do setor</b> do colaborador (e-mail do cadastro)</label></div>
       <div class="toolbar" style="margin-top:10px"><button class="btn" id="mRest">Voltar ao texto padrão</button><span class="sp"></span><button class="btn pri" id="mSv">Salvar modelo</button></div></div>`;
     A.$('#mRest', t).onclick = () => { A.$('#mAss', t).value = C.EMAIL_MOP_ASSUNTO; A.$('#mCorpo', t).value = C.EMAIL_MOP_CORPO; };
     A.$('#mSv', t).onclick = async () => {
       const cc = E.Mail.parseLista(A.$('#mCc', t).value); const ruim = cc.find((e) => !C.emailValido(e)); if (ruim) { A.toast(`E-mail inválido na cópia fixa: ${ruim}`, 'err'); return; }
-      await A.setCfg('mailMop', { assunto: A.$('#mAss', t).value.trim() || C.EMAIL_MOP_ASSUNTO, corpo: A.$('#mCorpo', t).value || C.EMAIL_MOP_CORPO, cc: cc.map(C.normEmail), copiarColabs: A.$('#mCol', t).checked }); A.toast('Modelo salvo.');
+      const para = E.Mail.parseLista(A.$('#mPara', t).value); const ruimP = para.find((e) => !C.emailValido(e)); if (ruimP) { A.toast(`E-mail inválido no destinatário: ${ruimP}`, 'err'); return; }
+      await A.setCfg('mailMop', { assunto: A.$('#mAss', t).value.trim() || C.EMAIL_MOP_ASSUNTO, corpo: A.$('#mCorpo', t).value || C.EMAIL_MOP_CORPO, para: para.map(C.normEmail), cc: cc.map(C.normEmail), copiarColabs: A.$('#mCol', t).checked, copiarAnalista3: A.$('#mA3', t).checked }); A.toast('Modelo salvo.');
     };
   }
 
@@ -3200,8 +3576,10 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     t.innerHTML = `<div class="card"><h2>Privacidade</h2><label class="chk"><input type="checkbox" id="pv" ${A.privado ? 'checked' : ''} ${ed ? '' : 'disabled'}> Ocultar detalhes de siglas sensíveis (exibir apenas “AUS”)</label>
       <p class="small muted">Vale como padrão para todos. Cada pessoa também pode alternar no botão “Privacidade” do topo, apenas para a própria tela.</p></div>
       <div class="card" style="margin-top:14px"><h2>Avisos automáticos</h2><label class="f">Antecedência dos avisos de aniversários e eventos (dias)<input type="number" id="ad" min="1" max="60" value="${A.cfg('avisoDias', 7)}" style="width:90px" ${ed ? '' : 'disabled'}></label>
-      <p class="small muted">Os avisos aparecem no sino do topo e na Visão geral, e se atualizam sozinhos enquanto o painel estiver aberto.</p></div>`;
+      <label class="f" style="margin-top:8px">Alertar o prazo máximo das férias com antecedência de (dias)<input type="number" id="pzd" min="30" max="365" value="${A.cfg('prazoFeriasDias', 90)}" style="width:90px" ${ed ? '' : 'disabled'}></label>
+      <p class="small muted">Os avisos aparecem no sino do topo e na Visão geral, e se atualizam sozinhos enquanto o painel estiver aberto. O prazo de férias fica vermelho quando faltam 30 dias ou menos.</p></div>`;
     A.$('#pv', t).onchange = async (e) => { await A.setCfg('privacidade', e.target.checked); A.syncPriv(); A.toast('Preferência salva.'); };
+    A.$('#pzd', t).onchange = async (e) => { const v = Math.min(365, Math.max(30, Number(e.target.value) || 90)); e.target.value = v; await A.setCfg('prazoFeriasDias', v); A.refreshBell && A.refreshBell(); A.toast('Preferência salva.'); };
     A.$('#ad', t).onchange = async (e) => { const v = Math.min(60, Math.max(1, Number(e.target.value) || 7)); e.target.value = v; await A.setCfg('avisoDias', v); A.refreshBell && A.refreshBell(); A.toast('Preferência salva.'); };
   }
   function ajuda(t) { t.innerHTML = MANUAL; }
@@ -3227,7 +3605,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     return out.sort((a, b) => (a.ordem < b.ordem ? -1 : 1));
   };
   A.refreshBell = () => {
-    const n = A.$('#bellN'); if (!n) return; const l = A.avisosAuto(); const t = l.length + (A.pendAcessos || 0) + (A.pendEmails ? A.pendEmails() : 0); n.textContent = t; n.style.display = t ? '' : 'none';
+    const n = A.$('#bellN'); if (!n) return; const l = A.avisosAuto(); const t = l.length + (A.pendAcessos || 0) + (A.pendEmails ? A.pendEmails() : 0) + (A.pendMopsAprovar ? A.pendMopsAprovar() : 0) + (A.pendPrazos ? A.pendPrazos() : 0); n.textContent = t; n.style.display = t ? '' : 'none';
   };
 
   /* ---------- telas de acesso ---------- */
@@ -3321,9 +3699,14 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       e.stopPropagation(); um.hidden = true; const l = A.avisosAuto();
       const pe = A.pendEmails ? A.pendEmails() : 0; const extra = [];
       if (A.pendAcessos) extra.push(`<div class="it act" data-go="config|acessos">🔐 ${A.pendAcessos} solicitação(ões) de acesso aguardando aprovação</div>`);
+      const pm = A.pendMopsAprovar ? A.pendMopsAprovar() : 0;
+      if (pm) extra.push(`<div class="it act" data-mop="1">✅ ${pm} MOP(s) de férias aguardando a sua aprovação</div>`);
+      const pp = A.pendPrazos ? A.pendPrazos() : 0;
+      if (pp) extra.push(`<div class="it act" data-go="eventos|">⏳ ${pp} prazo(s) de férias vencidos ou perto do limite máximo</div>`);
       if (pe) extra.push(`<div class="it act" data-go="eventos|">✉️ ${pe} aviso(s) de evento para enviar aos gerentes</div>`);
       bm.innerHTML = `${extra.length ? `<div class="hd"><b>Pendências</b></div>${extra.join('')}` : ''}<div class="hd"><b>Próximos ${A.cfg('avisoDias', 7)} dias</b></div>${l.length ? l.map((x) => `<div class="it">${esc(x.txt)}</div>`).join('') : '<div class="it muted">Nenhum aniversário ou evento no período.</div>'}`;
       A.$$('[data-go]', bm).forEach((it) => it.onclick = () => { const [v, tab] = it.dataset.go.split('|'); if (tab) A.ui.cfgTab = tab; A.go(v); });
+      A.$$('[data-mop]', bm).forEach((it) => it.onclick = () => { A.ui.ferias.tab = 'mops'; A.go('ferias'); });
       bm.hidden = !bm.hidden;
     };
     document.addEventListener('click', () => { um.hidden = true; bm.hidden = true; });
